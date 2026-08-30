@@ -1,0 +1,16 @@
+node_modules
+.next
+out
+build
+
+# local pulse / queue / spend state
+.data
+
+# env
+.env
+.env.local
+.env.*.local
+
+*.tsbuildinfo
+.DS_Store
+npm-debug.log*
