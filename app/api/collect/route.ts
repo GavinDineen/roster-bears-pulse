@@ -1,18 +1,14 @@
 import { NextRequest, NextResponse } from "next/server";
 import { QUERIES } from "@/lib/config";
-import {
-  gateCollect,
-  recordReads,
-  spendSummary,
-  LIMITS,
-} from "@/lib/spend";
+import { gateCollect, recordReads, spendSummary, LIMITS } from "@/lib/spend";
 import { canRead, recentSearch, searchBeatDesk } from "@/lib/x";
-import { scorePost, containsUrl, stripUrls } from "@/lib/rank";
-import { synthesize } from "@/lib/synthesize";
+import { scorePost } from "@/lib/rank";
+import { synthesize, draftFromFact } from "@/lib/synthesize";
+import { getFacts } from "@/lib/facts";
 import { readPulse, writePulse, readQueue, writeQueue } from "@/lib/store";
 import { fallbackPulse } from "@/lib/fallback";
 import { isServiceRequest, isCronRequest } from "@/lib/service-auth";
-import type { RawPost, ScoredPost } from "@/lib/types";
+import type { RawPost } from "@/lib/types";
 import type { QueuedTweet } from "@/lib/queue-types";
 
 export const runtime = "nodejs";
@@ -23,143 +19,136 @@ function mayCollect(req: NextRequest): boolean {
   return isServiceRequest(req) || isCronRequest(req);
 }
 
-/** Build a linkless draft tweet from a viral post. */
-function draftFromPost(p: ScoredPost): string {
-  const body = stripUrls(p.text).slice(0, 180).trim();
-  const lead = p.isBeat
-    ? `Per ${p.authorName}:`
-    : "Bears Twitter is buzzing:";
-  let t = `${lead} ${body}`.replace(/\s+/g, " ").trim();
-  if (t.length > 268) t = `${t.slice(0, 265)}…`;
-  return t;
-}
-
 async function runCollect(req: NextRequest): Promise<NextResponse> {
   if (!mayCollect(req)) {
-    return NextResponse.json(
-      { ok: false, error: "unauthorized" },
-      { status: 401 }
-    );
+    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
 
-  // ---- spend gate: if blocked, return cached pulse and DO NOT retry ----
+  // ---- spend gate: blocked → return cached pulse, do NOT retry ----
   const gate = await gateCollect();
   if (!gate.ok) {
-    const cached = await readPulse();
     return NextResponse.json(
       {
         ok: false,
         blocked: true,
         reason: gate.reason,
-        pulse: { ...cached, source: "cache" as const },
+        pulse: await readPulse(),
         spend: await spendSummary(),
       },
-      { status: 200 }
+      { status: 200 },
     );
   }
 
-  // ---- no credentials: serve fallback, no spend ----
-  if (!canRead()) {
-    const fb = fallbackPulse();
-    await writePulse(fb);
-    return NextResponse.json(
-      {
-        ok: false,
-        blocked: true,
-        reason: "No X_BEARER_TOKEN set — serving the static fallback pulse.",
-        pulse: fb,
-        spend: await spendSummary(),
-      },
-      { status: 200 }
-    );
-  }
+  // ---- FACTS: $0 X, fetched on collect, 3h cache, failure → last good ----
+  const factsBundle = await getFacts();
 
-  // ---- collect: exactly 2 queries (fan/team + beat desk), capped result count ----
+  // ---- ARGUMENT: exactly 2 X queries, max_results 20 ----
   const runBeat = LIMITS.queryCount() >= 2;
   const perQuery = LIMITS.maxResultsPerQuery();
   let fetched = 0;
   let dropped = 0;
   let beatHalf: "full" | "even" | "odd" | "n/a" = "n/a";
   let raw: RawPost[] = [];
-  try {
-    const r1 = await recentSearch(QUERIES[0].query, perQuery);
-    fetched += r1.fetched;
-    dropped += r1.dropped;
-    raw = raw.concat(r1.posts);
+  let xError: string | null = null;
 
-    if (runBeat) {
-      const r2 = await searchBeatDesk(perQuery);
-      fetched += r2.fetched;
-      dropped += r2.dropped;
-      beatHalf = r2.beatHalf;
-      raw = raw.concat(r2.posts);
+  if (canRead()) {
+    try {
+      const r1 = await recentSearch(QUERIES[0].query, perQuery);
+      fetched += r1.fetched;
+      dropped += r1.dropped;
+      raw = raw.concat(r1.posts);
+
+      if (runBeat) {
+        const r2 = await searchBeatDesk(perQuery);
+        fetched += r2.fetched;
+        dropped += r2.dropped;
+        beatHalf = r2.beatHalf;
+        raw = raw.concat(r2.posts);
+      }
+    } catch (e) {
+      xError = (e as Error).message;
     }
-  } catch (e) {
+  } else {
+    xError = "no X_BEARER_TOKEN";
+  }
+
+  // X read failed → keep the cached pulse's argument layer, but still refresh facts
+  if (xError && raw.length === 0) {
     const cached = await readPulse();
+    const merged = { ...cached, facts: factsBundle.facts.filter((f) => f.confidence !== "note") };
+    await writePulse(merged);
     return NextResponse.json(
       {
         ok: false,
         blocked: true,
-        reason: `X read failed: ${(e as Error).message}`,
-        pulse: { ...cached, source: "cache" as const },
+        reason: `X unavailable (${xError}) — facts refreshed, argument layer is cached`,
+        pulse: merged,
         spend: await spendSummary(),
       },
-      { status: 200 }
+      { status: 200 },
     );
   }
-
-  console.log(
-    `[collect] fetched=${fetched} kept=${raw.length} dropped=${dropped} beatHalf=${beatHalf}`
-  );
 
   // dedupe by id
   const seen = new Set<string>();
   raw = raw.filter((p) => (seen.has(p.id) ? false : (seen.add(p.id), true)));
 
-  // bill for every post X returned — dropped tweets are still billed, not refetched
+  // bill for every post X returned (dropped still billed, never refetched)
   await recordReads(fetched);
 
+  console.log(
+    `[collect] facts=${factsBundle.facts.length}(cache=${factsBundle.fromCache}) ` +
+      `x.fetched=${fetched} x.kept=${raw.length} x.dropped=${dropped} beatHalf=${beatHalf}`,
+  );
+
   const scored = raw.map(scorePost);
-  const pulse = scored.length ? synthesize(scored) : fallbackPulse();
+  const hasAnything =
+    factsBundle.facts.some((f) => f.confidence !== "note") || scored.length > 0;
+
+  const pulse = hasAnything
+    ? synthesize({
+        facts: factsBundle.facts,
+        factSources: factsBundle.sources,
+        factsFetchedAt: factsBundle.fetchedAt,
+        factsFromCache: factsBundle.fromCache,
+        posts: scored,
+        xMeta: { fetched, kept: scored.length, dropped, beatHalf },
+      })
+    : fallbackPulse();
+
   await writePulse(pulse);
 
-  // ---- queue viral drafts (never auto-post) ----
-  const threshold = LIMITS.viralThreshold();
+  // ---- tweet queue: draft ONLY from confirmed facts, never fan posts ----
   const queue = await readQueue();
-  const existingTexts = new Set(queue.tweets.map((t) => t.text));
+  const existing = new Set(queue.tweets.map((t) => t.text));
   let draftsQueued = 0;
-
-  const viralPicks = scored
-    .filter((p) => p.gravity >= threshold)
-    .sort((a, b) => b.gravity - a.gravity)
-    .slice(0, 5);
-
-  for (const p of viralPicks) {
-    const text = draftFromPost(p);
-    if (containsUrl(text) || existingTexts.has(text)) continue; // never queue URLs
+  const confirmed = factsBundle.facts.filter((f) => f.confidence === "confirmed").slice(0, 3);
+  for (const f of confirmed) {
+    const text = draftFromFact(f);
+    if (existing.has(text)) continue;
     const qt: QueuedTweet = {
       id: `qt_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`,
       text,
-      reason: `Viral pickup — gravity ${p.gravity} from @${p.authorHandle}`,
-      sourceGravity: p.gravity,
+      reason: `Confirmed fact — ${f.source}`,
+      sourceGravity: 0,
       createdAt: new Date().toISOString(),
       status: "pending",
     };
     queue.tweets.unshift(qt);
-    existingTexts.add(text);
+    existing.add(text);
     draftsQueued += 1;
   }
   await writeQueue(queue);
 
   return NextResponse.json({
     ok: true,
+    facts: pulse.facts.length,
+    factCounts: pulse.admin.factCounts,
     fetched,
-    kept: raw.length,
+    kept: scored.length,
     dropped,
     beatHalf,
-    postsAnalyzed: raw.length,
     draftsQueued,
-    autoTweet: false,
     pulse,
     spend: await spendSummary(),
   });

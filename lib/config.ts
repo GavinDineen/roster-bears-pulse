@@ -70,7 +70,8 @@ export const BEAT_QUERY_HANDLES = [
   "BearsPR",
 ];
 
-// Bears players / staff tracked for mention counts on the pulse.
+// OPTIONAL HINT ONLY — not a whitelist, not a gate. Player tiles come from
+// facts + roster-verb names in beat posts, never from this list.
 export const PLAYERS = [
   "Caleb Williams",
   "DJ Moore",
@@ -114,12 +115,6 @@ export function pickBeatHalf(): "even" | "odd" {
   return Math.floor(Date.now() / 60_000 / every) % 2 === 0 ? "even" : "odd";
 }
 
-export const RIVAL_TEAMS: { team: string; terms: string[] }[] = [
-  { team: "Packers", terms: ["Packers", "Green Bay", "GoPackGo"] },
-  { team: "Vikings", terms: ["Vikings", "Minnesota Vikings", "SKOL"] },
-  { team: "Lions", terms: ["Lions", "Detroit Lions", "OnePride"] },
-];
-
 // Query 1: fans / team, football-locked.
 // Query 2: local beat desk only — ONE search.
 export const QUERIES: { key: string; label: string; query: string }[] = [
@@ -135,8 +130,3 @@ export const QUERIES: { key: string; label: string; query: string }[] = [
     query: buildBeatQuery(BEAT_QUERY_HANDLES),
   },
 ];
-
-export const SITE_URL =
-  process.env.NEXT_PUBLIC_SITE_URL || "https://therostercollective.com";
-export const PULSE_PATH =
-  process.env.NEXT_PUBLIC_PULSE_PATH || "/intelligence/bears";

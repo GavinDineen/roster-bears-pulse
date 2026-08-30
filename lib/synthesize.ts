@@ -1,208 +1,329 @@
 import type {
-  Category,
   PulsePayload,
   ScoredPost,
-  PlayerPulse,
-  Story,
-  CreatorPrompt,
-  ViralPost,
-  BeatPost,
-  MediaVsFan,
-  RivalNoise,
+  Fact,
+  FactSourceResult,
+  BeatItem,
+  FanCluster,
+  PlayerTile,
+  PairedQuote,
+  ViralCard,
 } from "./types";
-import { RIVAL_TEAMS } from "./config";
-import { stripUrls } from "./rank";
+import { stripUrls, extractRosterNames } from "./rank";
 
-const CAT_LABEL: Record<Category, string> = {
-  "roster-move": "Roster move",
-  injury: "Injury watch",
-  practice: "Practice report",
-  presser: "Presser",
-  rumor: "Rumor mill",
-  analysis: "Film & analysis",
-  hype: "Fan hype",
-  rival: "Rival noise",
-  other: "Around the Bears",
-};
+const HEADER_LINE = "Facts from official/beat pages. X is the argument.";
 
 function clean(text: string): string {
   return stripUrls(text).replace(/\s+/g, " ").trim();
 }
 
-function headlineFor(c: Category, top: ScoredPost, players: string[]): string {
-  const who = players[0] ? `${players[0]}: ` : "";
-  const snippet = clean(top.text);
-  return `${CAT_LABEL[c]} — ${who}${snippet.slice(0, 96)}${snippet.length > 96 ? "…" : ""}`;
+function firstName(full: string): string {
+  return full.split(" ")[0];
 }
 
-function buildPrompts(stories: Story[], players: PlayerPulse[]): CreatorPrompt[] {
-  const out: CreatorPrompt[] = [];
-  for (const s of stories.slice(0, 3)) {
-    out.push({
-      angle: s.headline,
-      rationale: `${s.postCount} posts, combined gravity ${s.gravity}. ${CAT_LABEL[s.category]} is the live thread.`,
-      suggestedFormat:
-        s.category === "analysis"
-          ? "Film-room thread"
-          : s.category === "roster-move"
-            ? "Quick-hit reaction + depth-chart graphic"
-            : s.category === "injury"
-              ? "Status explainer short"
-              : "Talking-head short",
-    });
-  }
-  if (players[0]) {
-    out.push({
-      angle: `Why ${players[0].name} is the name Bears fans can't stop typing`,
-      rationale: `${players[0].mentions} mentions, top theme ${CAT_LABEL[players[0].topCategory]}.`,
-      suggestedFormat: "Player-focused explainer",
-    });
-  }
-  return out.slice(0, 4);
+function lastName(full: string): string {
+  const p = full.split(" ").filter((w) => !/^(Jr\.?|Sr\.?|II|III|IV)$/i.test(w));
+  return p[p.length - 1] || full;
 }
 
-export function synthesize(posts: ScoredPost[], windowHours = 48): PulsePayload {
-  const now = new Date().toISOString();
+// a fan post that asserts a roster move (verb + name)
+const MOVE_ASSERTION =
+  /\b(traded|trade|acquired|waived|waive|claimed|released|release|cut|signing|signed|to ir|injured reserve)\b/i;
 
-  // ---- players ----
-  const pmap = new Map<
-    string,
-    {
-      mentions: number;
-      gravity: number;
-      cats: Map<Category, number>;
-      sample: string;
-      sampleG: number;
-    }
-  >();
-  for (const p of posts) {
-    for (const name of p.players) {
-      const e =
-        pmap.get(name) ??
-        { mentions: 0, gravity: 0, cats: new Map(), sample: "", sampleG: -1 };
-      e.mentions += 1;
-      e.gravity += p.gravity;
-      e.cats.set(p.category, (e.cats.get(p.category) ?? 0) + 1);
-      if (p.gravity > e.sampleG) {
-        e.sample = clean(p.text);
-        e.sampleG = p.gravity;
+function assertsMove(text: string): boolean {
+  return MOVE_ASSERTION.test(text) && extractRosterNames(text).length > 0;
+}
+
+function assertedNames(text: string): string[] {
+  return assertsMove(text) ? extractRosterNames(text) : [];
+}
+
+// ---- fan argument clustering ----------------------------------------------
+
+const FIXED_TOKENS = ["trade", "53", "RB", "WR", "Poles", "Johnson", "waiver", "cut", "practice squad"];
+
+function tokenLabel(token: string, players: string[]): string {
+  const named = players.find((p) => lastName(p).toLowerCase() === token.toLowerCase());
+  if (named) return `${lastName(named)} — the fight`;
+  if (token === "53") return "The 53-man cut";
+  if (token === "RB") return "Running back room";
+  if (token === "WR") return "Receiver room";
+  if (token === "Poles") return "Poles under fire";
+  if (token === "trade") return "Trade fallout";
+  if (token === "waiver" || token === "cut") return "Who got cut";
+  if (token === "practice squad") return "Practice-squad math";
+  return `${token} debate`;
+}
+
+const POS = /\b(good|great|love|smart|right call|win|steal|glad|finally|underrated)\b/i;
+const NEG = /\b(bad|terrible|hate|dumb|wrong|mistake|overpaid|bust|panic|awful|joke|fleeced)\b/i;
+
+function tensionLine(posts: ScoredPost[]): string {
+  const pos = posts.some((p) => POS.test(p.text));
+  const neg = posts.some((p) => NEG.test(p.text));
+  if (pos && neg) return "Fans split — some call it the right move, others are furious.";
+  if (neg) return "The room is mostly angry about it.";
+  if (pos) return "The room mostly likes it.";
+  return "Fans are chewing on it, no clear side yet.";
+}
+
+function buildFanArgument(
+  fanPosts: ScoredPost[],
+  confirmedFacts: Fact[],
+  beatNames: string[],
+): FanCluster[] {
+  if (fanPosts.length === 0) return [];
+
+  const factPlayers = confirmedFacts.map((f) => f.player).filter((p): p is string => !!p);
+  const tokens = [
+    ...new Set([
+      ...factPlayers.map(lastName),
+      ...beatNames.map(lastName),
+      ...FIXED_TOKENS,
+    ]),
+  ];
+
+  // assign each post to the tokens it matches
+  const buckets = new Map<string, ScoredPost[]>();
+  for (const post of fanPosts) {
+    const low = post.text.toLowerCase();
+    for (const tok of tokens) {
+      const hit =
+        tok.length <= 3
+          ? new RegExp(`\\b${tok.toLowerCase()}\\b`).test(low)
+          : low.includes(tok.toLowerCase());
+      if (hit) {
+        const list = buckets.get(tok) ?? [];
+        list.push(post);
+        buckets.set(tok, list);
       }
-      pmap.set(name, e);
     }
   }
-  const players: PlayerPulse[] = [...pmap.entries()]
-    .map(([name, e]) => ({
-      name,
-      mentions: e.mentions,
-      gravity: e.gravity,
-      topCategory:
-        [...e.cats.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] ?? "other",
-      sampleText: e.sample,
-    }))
-    .sort((a, b) => b.gravity - a.gravity)
-    .slice(0, 8);
 
-  // ---- stories (cluster by category) ----
-  const cmap = new Map<Category, ScoredPost[]>();
-  for (const p of posts) {
-    const arr = cmap.get(p.category) ?? [];
-    arr.push(p);
-    cmap.set(p.category, arr);
-  }
-  const stories: Story[] = [...cmap.entries()]
-    .filter(([c]) => c !== "other" && c !== "hype")
-    .map(([c, arr]) => {
-      arr.sort((a, b) => b.gravity - a.gravity);
-      const storyPlayers = [...new Set(arr.flatMap((x) => x.players))].slice(0, 4);
+  const confirmedNames = new Set(factPlayers.map((p) => lastName(p).toLowerCase()));
+
+  const clusters: FanCluster[] = [...buckets.entries()]
+    .map(([tok, posts]) => {
+      const authors = new Set(posts.map((p) => p.authorHandle)).size;
+      const gravity = posts.reduce((s, p) => s + p.gravity, 0);
+      const top = [...posts].sort((a, b) => b.gravity - a.gravity).slice(0, 2);
+
+      // badge
+      const anyAssertsMove = posts.some((p) => assertsMove(p.text));
+      const asserted = new Set(
+        posts.flatMap((p) => assertedNames(p.text).map((n) => lastName(n).toLowerCase())),
+      );
+      const matchesConfirmed =
+        confirmedNames.has(tok.toLowerCase()) ||
+        [...asserted].some((n) => confirmedNames.has(n));
+      let badge: FanCluster["badge"] = null;
+      if (matchesConfirmed) badge = "IN PLAY";
+      else if (anyAssertsMove) badge = "UNVERIFIED";
+
       return {
-        headline: headlineFor(c, arr[0], storyPlayers),
-        summary: clean(arr[0].text),
-        category: c,
-        gravity: arr.reduce((s, x) => s + x.gravity, 0),
-        players: storyPlayers,
-        postCount: arr.length,
+        cluster: {
+          label: tokenLabel(tok, [...factPlayers, ...beatNames]),
+          tension: tensionLine(posts),
+          authors,
+          tweets: top.map((p) => ({ handle: p.authorHandle, text: clean(p.text) })),
+          badge,
+        } as FanCluster,
+        authors,
+        gravity,
       };
     })
-    .sort((a, b) => b.gravity - a.gravity)
-    .slice(0, 5);
+    .filter((c) => c.authors >= 2)
+    .sort((a, b) => b.authors - a.authors || b.gravity - a.gravity)
+    .slice(0, 5)
+    .map((c) => c.cluster);
 
-  // ---- viral ----
-  const viral: ViralPost[] = [...posts]
-    .sort((a, b) => b.gravity - a.gravity)
-    .slice(0, 6)
-    .map((p) => ({
-      handle: p.authorHandle,
-      name: p.authorName,
-      text: clean(p.text),
-      gravity: p.gravity,
-      likes: p.likes,
-      retweets: p.retweets,
-      isBeat: p.isBeat,
-    }));
+  return clusters;
+}
 
-  // ---- beat ----
-  const beat: BeatPost[] = posts
-    .filter((p) => p.isBeat)
+// ---- player tiles --------------------------------------------------------
+
+function buildPlayerTiles(facts: Fact[], beatPosts: ScoredPost[]): PlayerTile[] {
+  const tiles = new Map<string, PlayerTile>();
+
+  for (const f of facts) {
+    if (!f.player) continue;
+    tiles.set(f.player.toLowerCase(), {
+      name: f.player,
+      status: f.type,
+      detail: f.detail,
+    });
+  }
+
+  // names in >= 2 beat posts this collect
+  const beatCount = new Map<string, { name: string; n: number }>();
+  for (const post of beatPosts) {
+    for (const name of new Set(extractRosterNames(post.text))) {
+      const e = beatCount.get(name.toLowerCase()) ?? { name, n: 0 };
+      e.n += 1;
+      beatCount.set(name.toLowerCase(), e);
+    }
+  }
+  for (const { name, n } of beatCount.values()) {
+    if (n >= 2 && !tiles.has(name.toLowerCase())) {
+      tiles.set(name.toLowerCase(), {
+        name,
+        status: "mentioned",
+        detail: `In ${n} beat posts this collect`,
+      });
+    }
+  }
+
+  return [...tiles.values()].slice(0, 8);
+}
+
+// ---- media vs fan (confirmed events only) --------------------------------
+
+function buildMediaVsFan(
+  confirmedFacts: Fact[],
+  beatPosts: ScoredPost[],
+  fanPosts: ScoredPost[],
+): PairedQuote[] {
+  const out: PairedQuote[] = [];
+  for (const f of confirmedFacts) {
+    if (!f.player) continue;
+    const last = lastName(f.player).toLowerCase();
+    const b = beatPosts.find((p) => p.text.toLowerCase().includes(last));
+    const fan = fanPosts.find((p) => p.text.toLowerCase().includes(last));
+    if (b && fan) {
+      out.push({
+        event: f.detail,
+        beat: { handle: b.authorHandle, text: clean(b.text) },
+        fan: { handle: fan.authorHandle, text: clean(fan.text) },
+      });
+    }
+  }
+  return out;
+}
+
+// ---- creator prompts ----------------------------------------------------
+
+function buildPrompts(confirmedFacts: Fact[]): string[] {
+  if (confirmedFacts.length === 0) return ["Nothing confirmed. Don't tweet a rumor."];
+  return confirmedFacts
+    .slice(0, 2)
+    .map(
+      (f) =>
+        `Explain "${f.detail}" in 90 seconds. Do not add names that are not on this desk.`,
+    );
+}
+
+// ---- headline / summary -----------------------------------------------------
+
+function buildHeadline(confirmedFacts: Fact[]): string {
+  if (confirmedFacts.length === 0) return "No new official moves since last collect.";
+  return confirmedFacts[0].detail;
+}
+
+function buildSummary(confirmedFacts: Fact[]): string {
+  if (confirmedFacts.length === 0) return "Desk is waiting on official moves.";
+  const parts = confirmedFacts.slice(0, 2).map((f) => f.quote.replace(/\s*\.\s*$/, ""));
+  return parts.join(". ") + ".";
+}
+
+// ---- main -----------------------------------------------------------------
+
+export interface SynthesizeInput {
+  facts: Fact[];
+  factSources: FactSourceResult[];
+  factsFetchedAt: string;
+  factsFromCache: boolean;
+  posts: ScoredPost[]; // all kept X posts (fan + beat)
+  xMeta: { fetched: number; kept: number; dropped: number; beatHalf: string };
+}
+
+export function synthesize(input: SynthesizeInput): PulsePayload {
+  const { facts, factSources, factsFetchedAt, factsFromCache, posts, xMeta } = input;
+
+  const now = new Date().toISOString();
+
+  const beatPosts = posts.filter((p) => p.isBeat);
+  const fanPosts = posts.filter((p) => !p.isBeat);
+
+  const uiFacts = facts.filter((f) => f.confidence !== "note");
+  const confirmedFacts = facts.filter((f) => f.confidence === "confirmed");
+  const disputedFacts = facts.filter((f) => f.confidence === "disputed");
+  const noteFacts = facts.filter((f) => f.confidence === "note");
+
+  // beat rail — verbatim, newest first
+  const beat: BeatItem[] = beatPosts
+    .slice()
     .sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt))
-    .slice(0, 6)
+    .slice(0, 8)
     .map((p) => ({
       handle: p.authorHandle,
       name: p.authorName,
       text: clean(p.text),
       createdAt: p.createdAt,
-      category: p.category,
     }));
 
-  // ---- media vs fan ----
-  const media = posts.filter((p) => p.isBeat);
-  const fan = posts.filter((p) => !p.isBeat);
-  const total = Math.max(1, posts.length);
-  const mediaGravity = media.reduce((s, p) => s + p.gravity, 0);
-  const fanGravity = fan.reduce((s, p) => s + p.gravity, 0);
-  const mediaVsFan: MediaVsFan = {
-    mediaShare: Math.round((media.length / total) * 100),
-    fanShare: Math.round((fan.length / total) * 100),
-    mediaGravity,
-    fanGravity,
-    note:
-      mediaGravity >= fanGravity
-        ? "Beat writers are driving the conversation right now."
-        : "Fans are outpacing the beat on volume and reach right now.",
-  };
+  const beatNames = [...new Set(beatPosts.flatMap((p) => extractRosterNames(p.text)))];
 
-  // ---- rival noise ----
-  const rivalNoise: RivalNoise[] = RIVAL_TEAMS.map((rt) => {
-    const hits = posts.filter((p) =>
-      rt.terms.some((t) => p.text.toLowerCase().includes(t.toLowerCase()))
-    );
-    hits.sort((a, b) => b.gravity - a.gravity);
-    return {
-      team: rt.team,
-      mentions: hits.length,
-      sampleText: hits[0] ? clean(hits[0].text) : "",
-    };
-  }).filter((r) => r.mentions > 0);
+  const players = buildPlayerTiles(uiFacts, beatPosts);
+  const fanArgument = buildFanArgument(fanPosts, confirmedFacts, beatNames);
+  const mediaVsFan = buildMediaVsFan(confirmedFacts, beatPosts, fanPosts);
+  const creatorPrompts = buildPrompts(confirmedFacts);
 
-  const creatorPrompts = buildPrompts(stories, players);
+  const confirmedNames = new Set(
+    confirmedFacts.map((f) => (f.player ? lastName(f.player).toLowerCase() : "")),
+  );
+  const viral: ViralCard[] = fanPosts
+    .slice()
+    .sort((a, b) => b.gravity - a.gravity)
+    .slice(0, 6)
+    .map((p) => {
+      const asserted = assertedNames(p.text).map((n) => lastName(n).toLowerCase());
+      const unverified =
+        asserted.length > 0 && !asserted.some((n) => confirmedNames.has(n));
+      return {
+        handle: p.authorHandle,
+        name: p.authorName,
+        text: clean(p.text),
+        likes: p.likes,
+        retweets: p.retweets,
+        label: "Fan post — not a source." as const,
+        unverified,
+      };
+    });
 
-  const headline =
-    stories[0]?.headline ??
-    (players[0]
-      ? `${players[0].name} is leading Bears Twitter today`
-      : "Quiet day on Bears Twitter");
+  const noNews = uiFacts.length === 0 && posts.length === 0;
 
   return {
     generatedAt: now,
-    source: "live",
-    postsAnalyzed: posts.length,
-    windowHours,
-    headline,
-    players,
-    stories,
-    creatorPrompts,
-    viral,
+    source: noNews ? "cached-context" : "live",
+    headerLine: HEADER_LINE,
+    headline: buildHeadline(confirmedFacts),
+    summary: buildSummary(confirmedFacts),
+    facts: uiFacts,
     beat,
+    fanArgument,
+    players,
+    creatorPrompts,
     mediaVsFan,
-    rivalNoise,
+    viral,
+    admin: {
+      factSources,
+      factCounts: {
+        confirmed: confirmedFacts.length,
+        disputed: disputedFacts.length,
+        note: noteFacts.length,
+      },
+      notes: noteFacts,
+      x: xMeta,
+      factsFetchedAt,
+      factsFromCache,
+    },
   };
+}
+
+// exported for the collect route's draft-from-confirmed-fact logic
+export function draftFromFact(f: Fact): string {
+  const via = f.source ? ` (via ${f.source})` : "";
+  let t = `Confirmed: ${f.detail}.${via}`.replace(/\s+/g, " ").trim();
+  if (t.length > 268) t = `${t.slice(0, 265)}…`;
+  return t;
 }

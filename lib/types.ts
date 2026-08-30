@@ -1,3 +1,5 @@
+// ---- internal (X ingestion) ----
+
 export type Category =
   | "roster-move"
   | "injury"
@@ -28,75 +30,103 @@ export interface RawPost {
 export interface ScoredPost extends RawPost {
   category: Category;
   gravity: number;
-  players: string[];
+  players: string[]; // hint only — NOT a whitelist, NOT a tile gate
 }
 
-export interface PlayerPulse {
+// ---- FACTS layer (official / beat pages, $0 X) ----
+
+export type FactType = "trade" | "waiver" | "cut" | "sign" | "ir" | "note";
+export type FactConfidence = "confirmed" | "disputed" | "note";
+
+export interface FactRef {
+  source: string;
+  url: string;
+  quote: string; // exact sentence, ≤200 chars
+}
+
+export interface Fact {
+  type: FactType;
+  player: string | null;
+  detail: string;
+  source: string; // primary source label
+  url: string; // primary source url
+  at: string; // ISO — when the desk saw it
+  quote: string; // primary exact sentence, ≤200 chars
+  confidence: FactConfidence;
+  refs: FactRef[]; // every corroborating sentence (incl. the primary)
+}
+
+export interface FactSourceResult {
+  url: string;
+  ok: boolean;
+  parsed: number; // candidate move-sentences extracted
+  error?: string;
+}
+
+// ---- ARGUMENT layer (X only) ----
+
+export interface BeatItem {
+  handle: string;
   name: string;
-  mentions: number;
-  gravity: number;
-  topCategory: Category;
-  sampleText: string;
+  text: string; // verbatim, links stripped only
+  createdAt: string;
 }
 
-export interface Story {
-  headline: string;
-  summary: string;
-  category: Category;
-  gravity: number;
-  players: string[];
-  postCount: number;
+export interface FanCluster {
+  label: string; // 3–6 words
+  tension: string; // one line, both sides if they exist
+  authors: number; // unique authors
+  tweets: { handle: string; text: string }[]; // ≤ 2, verbatim
+  badge: "UNVERIFIED" | "IN PLAY" | null;
 }
 
-export interface CreatorPrompt {
-  angle: string;
-  rationale: string;
-  suggestedFormat: string;
+export interface PlayerTile {
+  name: string;
+  status: FactType | "mentioned";
+  detail: string;
 }
 
-export interface ViralPost {
+export interface PairedQuote {
+  event: string;
+  beat: { handle: string; text: string };
+  fan: { handle: string; text: string };
+}
+
+export interface ViralCard {
   handle: string;
   name: string;
   text: string;
-  gravity: number;
   likes: number;
   retweets: number;
-  isBeat: boolean;
+  label: "Fan post — not a source.";
+  unverified: boolean; // claims a move not on the desk
 }
 
-export interface BeatPost {
-  handle: string;
-  name: string;
-  text: string;
-  createdAt: string;
-  category: Category;
+// ---- admin-only ----
+
+export interface AdminMeta {
+  factSources: FactSourceResult[];
+  factCounts: { confirmed: number; disputed: number; note: number };
+  notes: Fact[]; // single-blog signals, hidden from members
+  x: { fetched: number; kept: number; dropped: number; beatHalf: string };
+  factsFetchedAt: string;
+  factsFromCache: boolean;
 }
 
-export interface MediaVsFan {
-  mediaShare: number;
-  fanShare: number;
-  mediaGravity: number;
-  fanGravity: number;
-  note: string;
-}
-
-export interface RivalNoise {
-  team: string;
-  mentions: number;
-  sampleText: string;
-}
+// ---- the payload ----
 
 export interface PulsePayload {
   generatedAt: string;
-  source: "live" | "fallback" | "cache";
-  postsAnalyzed: number;
-  windowHours: number;
+  source: "live" | "cached-context";
+  headerLine: string;
   headline: string;
-  players: PlayerPulse[];
-  stories: Story[];
-  creatorPrompts: CreatorPrompt[];
-  viral: ViralPost[];
-  beat: BeatPost[];
-  mediaVsFan: MediaVsFan;
-  rivalNoise: RivalNoise[];
+  summary: string;
+  facts: Fact[]; // confirmed + disputed only
+  beat: BeatItem[];
+  fanArgument: FanCluster[];
+  players: PlayerTile[];
+  creatorPrompts: string[]; // ≤ 2
+  mediaVsFan: PairedQuote[];
+  viral: ViralCard[];
+  admin: AdminMeta; // the Roster app strips this for non-admins
 }

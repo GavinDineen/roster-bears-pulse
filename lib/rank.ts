@@ -45,17 +45,45 @@ function esc(s: string): string {
   return s.replace(/[.*+?^${}()|[\]\\'-]/g, "\\$&");
 }
 
-export function playerMentions(text: string): string[] {
+/**
+ * OPTIONAL HINT ONLY. Full-name matches against the loose PLAYERS list — never a
+ * whitelist, never a gate for tiles. Used only to enrich clustering tokens.
+ */
+export function playerHints(text: string): string[] {
   const hits = new Set<string>();
   for (const p of PLAYERS) {
-    const full = new RegExp(`\\b${esc(p)}\\b`, "i");
-    const parts = p.split(" ");
-    const last = parts[parts.length - 1];
-    const lastRe = new RegExp(`\\b${esc(last)}\\b`, "i");
-    // Full name always counts; bare last name counts only if it's distinctive (>3 chars).
-    if (full.test(text) || (last.length > 3 && lastRe.test(text))) hits.add(p);
+    if (new RegExp(`\\b${esc(p)}\\b`, "i").test(text)) hits.add(p);
   }
   return [...hits];
+}
+
+const ROSTER_VERB =
+  "traded|trade|acquired|acquire|dealt|waived|waive|claimed|released|release|cut|signed|sign|re-signed|placed";
+const PNAME =
+  "[A-Z][a-z'’.-]+(?:\\s[A-Z][a-z'’.-]+){1,2}(?:\\s(?:Jr\\.?|Sr\\.?|II|III|IV))?";
+const NON_PERSON_HINT =
+  /\b(bears|chicago|packers|vikings|lions|halas|nfl|nfc|espn|cbs|tribune|wire|gridiron|city|field|squad|reserve|roster|sunday|monday|tuesday|wednesday|thursday|friday|saturday|week)\b/i;
+
+/**
+ * Names sitting next to a roster verb ("waived X", "X was traded"). This is how
+ * player tiles are seeded from beat text — not from a hardcoded roster.
+ */
+export function extractRosterNames(text: string): string[] {
+  const out = new Set<string>();
+  const t = text.replace(/\s+/g, " ");
+  const re1 = new RegExp(`\\b(?:${ROSTER_VERB})\\b[^.]{0,30}?\\b(${PNAME})\\b`, "gi");
+  const re2 = new RegExp(
+    `\\b(${PNAME})\\b[^.]{0,30}?\\b(?:was|were|has been|is|gets?|got)\\b[^.]{0,15}?\\b(?:${ROSTER_VERB})\\b`,
+    "gi",
+  );
+  for (const re of [re1, re2]) {
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(t))) {
+      const name = m[1].trim().replace(/[.,;:]$/, "");
+      if (!NON_PERSON_HINT.test(name) && new RegExp(`^${PNAME}$`).test(name)) out.add(name);
+    }
+  }
+  return [...out];
 }
 
 export function gravity(post: RawPost): number {
@@ -75,7 +103,10 @@ export function scorePost(post: RawPost): ScoredPost {
     ...post,
     category: categorize(post.text),
     gravity: gravity(post),
-    players: playerMentions(post.text),
+    // hint set for clustering — roster-verb names first, loose name list second
+    players: [
+      ...new Set([...extractRosterNames(post.text), ...playerHints(post.text)]),
+    ],
   };
 }
 
