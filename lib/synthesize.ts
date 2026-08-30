@@ -221,7 +221,7 @@ function buildHeadline(confirmedFacts: Fact[]): string {
 
 function buildSummary(confirmedFacts: Fact[]): string {
   if (confirmedFacts.length === 0) return "Desk is waiting on official moves.";
-  const parts = confirmedFacts.slice(0, 2).map((f) => f.quote.replace(/\s*\.\s*$/, ""));
+  const parts = confirmedFacts.slice(0, 2).map((f) => f.quote.replace(/[.\s]+$/, ""));
   return parts.join(". ") + ".";
 }
 
