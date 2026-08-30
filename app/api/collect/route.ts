@@ -11,25 +11,16 @@ import { scorePost, containsUrl, stripUrls } from "@/lib/rank";
 import { synthesize } from "@/lib/synthesize";
 import { readPulse, writePulse, readQueue, writeQueue } from "@/lib/store";
 import { fallbackPulse } from "@/lib/fallback";
-import { sessionFromRequest, isAdmin } from "@/lib/auth";
+import { isServiceRequest, isCronRequest } from "@/lib/service-auth";
 import type { RawPost, ScoredPost } from "@/lib/types";
 import type { QueuedTweet } from "@/lib/queue-types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** Cron calls in with the CRON_SECRET bearer token. */
-function hasCronSecret(req: NextRequest): boolean {
-  const secret = process.env.CRON_SECRET;
-  if (!secret) return false;
-  const header = req.headers.get("authorization") || "";
-  const qs = new URL(req.url).searchParams.get("secret");
-  return header === `Bearer ${secret}` || qs === secret;
-}
-
-/** Collect runs only for an admin session or the cron secret. */
+/** Collect runs for the Roster app (admin action) or Vercel Cron. */
 function mayCollect(req: NextRequest): boolean {
-  return isAdmin(sessionFromRequest(req)) || hasCronSecret(req);
+  return isServiceRequest(req) || isCronRequest(req);
 }
 
 /** Build a linkless draft tweet from a viral post. */

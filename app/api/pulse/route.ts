@@ -1,27 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { readPulse } from "@/lib/store";
-import { sessionFromRequest } from "@/lib/auth";
-import type { PulsePayload } from "@/lib/types";
+import { isServiceRequest } from "@/lib/service-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// Members get the pulse with operator/meta fields stripped.
-function memberView(p: PulsePayload) {
-  const { postsAnalyzed, source, ...rest } = p;
-  void postsAnalyzed;
-  void source;
-  return rest;
-}
-
-// Read-only. Polled every 20s by logged-in views. Never triggers a collect.
+// Full pulse for the Roster app. The Roster app strips operator fields per role
+// before it reaches a member. Never triggers a collect.
 export async function GET(req: NextRequest) {
-  const session = sessionFromRequest(req);
-  if (!session) {
+  if (!isServiceRequest(req)) {
     return NextResponse.json({ error: "unauthorized" }, { status: 401 });
   }
-  const pulse = await readPulse();
-  return NextResponse.json(
-    session.role === "admin" ? pulse : memberView(pulse)
-  );
+  return NextResponse.json(await readPulse());
 }

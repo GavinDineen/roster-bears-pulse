@@ -3,14 +3,14 @@ import { readQueue, writeQueue } from "@/lib/store";
 import { gateWrite, recordWrite } from "@/lib/spend";
 import { canWrite, postTweet } from "@/lib/x";
 import { containsUrl } from "@/lib/rank";
-import { sessionFromRequest, isAdmin } from "@/lib/auth";
+import { isServiceRequest } from "@/lib/service-auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// POST { id, action: "post" | "skip" } — admin session only.
+// POST { id, action: "post" | "skip" } — Roster app only (admin-gated there).
 export async function POST(req: NextRequest) {
-  if (!isAdmin(sessionFromRequest(req))) {
+  if (!isServiceRequest(req)) {
     return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
   }
 
