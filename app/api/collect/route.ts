@@ -11,18 +11,25 @@ import { scorePost, containsUrl, stripUrls } from "@/lib/rank";
 import { synthesize } from "@/lib/synthesize";
 import { readPulse, writePulse, readQueue, writeQueue } from "@/lib/store";
 import { fallbackPulse } from "@/lib/fallback";
+import { sessionFromRequest, isAdmin } from "@/lib/auth";
 import type { RawPost, ScoredPost } from "@/lib/types";
 import type { QueuedTweet } from "@/lib/queue-types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-function isAuthed(req: NextRequest): boolean {
+/** Cron calls in with the CRON_SECRET bearer token. */
+function hasCronSecret(req: NextRequest): boolean {
   const secret = process.env.CRON_SECRET;
   if (!secret) return false;
   const header = req.headers.get("authorization") || "";
   const qs = new URL(req.url).searchParams.get("secret");
   return header === `Bearer ${secret}` || qs === secret;
+}
+
+/** Collect runs only for an admin session or the cron secret. */
+function mayCollect(req: NextRequest): boolean {
+  return isAdmin(sessionFromRequest(req)) || hasCronSecret(req);
 }
 
 /** Build a linkless draft tweet from a viral post. */
@@ -37,10 +44,7 @@ function draftFromPost(p: ScoredPost): string {
 }
 
 async function runCollect(req: NextRequest): Promise<NextResponse> {
-  const allowUnauth =
-    (process.env.X_ALLOW_UNAUTH_COLLECT || "true") === "true";
-
-  if (!allowUnauth && !isAuthed(req)) {
+  if (!mayCollect(req)) {
     return NextResponse.json(
       { ok: false, error: "unauthorized" },
       { status: 401 }

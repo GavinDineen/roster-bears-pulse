@@ -3,12 +3,17 @@ import { readQueue, writeQueue } from "@/lib/store";
 import { gateWrite, recordWrite } from "@/lib/spend";
 import { canWrite, postTweet } from "@/lib/x";
 import { containsUrl } from "@/lib/rank";
+import { sessionFromRequest, isAdmin } from "@/lib/auth";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-// POST { id, action: "post" | "skip" }
+// POST { id, action: "post" | "skip" } — admin session only.
 export async function POST(req: NextRequest) {
+  if (!isAdmin(sessionFromRequest(req))) {
+    return NextResponse.json({ ok: false, error: "unauthorized" }, { status: 401 });
+  }
+
   const body = (await req.json().catch(() => ({}))) as {
     id?: string;
     action?: "post" | "skip";
