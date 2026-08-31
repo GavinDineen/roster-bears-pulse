@@ -1,4 +1,5 @@
 import { kvGetJSON, kvSetJSON } from "./kv";
+import { extractTradeLegsLLM } from "./llmExtract";
 import type { Fact, FactLeg, FactRef, FactSourceResult, FactType, FactConfidence } from "./types";
 
 // FACT PIPE — $0 X. Scrapes official / beat transaction pages for confirmed
@@ -106,7 +107,7 @@ const TEAM_ALIASES: [RegExp, string][] = [
   [/seahawks/i, "Seahawks"],
   [/\brams\b/i, "Rams"],
   [/cardinals/i, "Cardinals"],
-  [/falcons/i, "Falcons"],
+  [/falcons|atlanta/i, "Falcons"],
   [/panthers/i, "Panthers"],
   [/saints/i, "Saints"],
   [/buccaneers|\bbucs\b/i, "Buccaneers"],
@@ -129,7 +130,7 @@ const TEAM_ALIASES: [RegExp, string][] = [
 ];
 
 const TEAM_TOKEN =
-  "(?:Packers|Green Bay|Vikings|Minnesota|Lions|Detroit|Cowboys|Eagles|Giants|Commanders|49ers|Niners|Seahawks|Rams|Cardinals|Falcons|Panthers|Saints|Buccaneers|Bucs|Bengals|Browns|Ravens|Steelers|Bills|Dolphins|Patriots|Jets|Titans|Colts|Texans|Jaguars|Jags|Broncos|Chiefs|Raiders|Chargers)";
+  "(?:Packers|Green Bay|Vikings|Minnesota|Lions|Detroit|Cowboys|Eagles|Giants|Commanders|49ers|Niners|Seahawks|Rams|Cardinals|Falcons|Atlanta|Panthers|Saints|Buccaneers|Bucs|Bengals|Browns|Ravens|Steelers|Bills|Dolphins|Patriots|Jets|Titans|Colts|Texans|Jaguars|Jags|Broncos|Chiefs|Raiders|Chargers)";
 
 function canonicalTeam(raw: string): string | null {
   for (const [re, name] of TEAM_ALIASES) if (re.test(raw)) return name;
@@ -508,17 +509,31 @@ async function extractSource(src: {
       if (!ANNOUNCEMENT.test(s)) continue;
 
       if (TRADE_VERB_RE.test(s)) {
-        // ---- trade sentence: structural parse first, loose fallback second ----
-        const team = sentenceTeamOf(s);
-        const structural = team ? parseTradeSentence(s) : null;
+        // ---- trade sentence: LLM structured extraction first, regex fallback second ----
+        // The regex path (sentenceTeamOf/parseTradeSentence/extractTradeLegsFallback) has
+        // no concept of grammatical subject, so it cannot tell a Bears-perspective sentence
+        // from an opponent-perspective one — that's what produced the Clark Phillips III
+        // duplicate-leg bug. The LLM call re-reads the same already-scraped sentence and
+        // resolves direction relative to the Bears explicitly. If it's unconfigured or
+        // fails for any reason, behavior falls back to the original regex path unchanged.
+        let team: string | null = null;
+        let legs: { label: string; kind: "player" | "pick"; direction: "in" | "out" }[] = [];
 
-        const legs: { label: string; kind: "player" | "pick"; direction: "in" | "out" }[] = [];
-        if (structural) {
-          for (const l of structural.outgoing) legs.push({ ...l, direction: "out" });
-          for (const l of structural.incoming) legs.push({ ...l, direction: "in" });
+        const llm = await extractTradeLegsLLM(s);
+        if (llm) {
+          if (!llm.isTrade) continue; // LLM determined this sentence isn't actually a trade
+          team = llm.team;
+          legs = llm.legs;
         } else {
-          for (const mv of extractTradeLegsFallback(s)) {
-            legs.push({ label: mv.player, kind: "player", direction: mv.direction });
+          team = sentenceTeamOf(s);
+          const structural = team ? parseTradeSentence(s) : null;
+          if (structural) {
+            for (const l of structural.outgoing) legs.push({ ...l, direction: "out" });
+            for (const l of structural.incoming) legs.push({ ...l, direction: "in" });
+          } else {
+            for (const mv of extractTradeLegsFallback(s)) {
+              legs.push({ label: mv.player, kind: "player", direction: mv.direction });
+            }
           }
         }
 

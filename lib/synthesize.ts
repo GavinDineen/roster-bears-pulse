@@ -135,7 +135,7 @@ function buildFanArgument(fanPosts: ScoredPost[], confirmedFacts: Fact[]): FanCl
           label: tokenLabel(tok, factPlayers),
           tension: tensionLine(posts),
           authors,
-          tweets: top.map((p) => ({ handle: p.authorHandle, text: clean(p.text) })),
+          tweets: top.map((p) => ({ handle: p.authorHandle, text: clean(p.text), url: p.url })),
           badge,
         } as FanCluster,
         authors,
@@ -272,6 +272,7 @@ export function synthesize(input: SynthesizeInput): PulsePayload {
       name: p.authorName,
       text: clean(p.text),
       createdAt: p.createdAt,
+      url: p.url,
     }));
 
   const players = buildPlayerTiles(uiFacts, beatPosts);

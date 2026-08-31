@@ -84,13 +84,14 @@ export interface BeatItem {
   name: string;
   text: string; // verbatim, links + photo-credit captions stripped only
   createdAt: string;
+  url: string; // link to the original X post
 }
 
 export interface FanCluster {
   label: string; // 3–6 words
   tension: string; // one line, both sides if they exist
   authors: number; // unique authors
-  tweets: { handle: string; text: string }[]; // ≤ 2, verbatim
+  tweets: { handle: string; text: string; url: string }[]; // ≤ 2, verbatim
   badge: "UNVERIFIED" | "IN PLAY" | null;
 }
 
