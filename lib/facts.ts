@@ -14,7 +14,7 @@ const CACHE_TTL_MS = 3 * 60 * 60 * 1000;
 const FETCH_TIMEOUT_MS = 8000;
 const FACT_MAX_AGE_MS = 72 * 60 * 60 * 1000; // ignore moves older than 3 days
 
-type SourceKind = "official" | "wire";
+export type SourceKind = "official" | "wire";
 
 // "official" (Bears / NFL.com / CBS transactions) confirms on its own.
 // "wire" (Bears Wire / WCG / Tribune) needs two distinct wires to confirm.
@@ -467,7 +467,7 @@ async function fetchText(url: string): Promise<string> {
   }
 }
 
-interface RawFact {
+export interface RawFact {
   type: FactType;
   player: string; // person label (with position prefix, for trades) or pick label
   legKind: "player" | "pick"; // trade only — everything else is "player"
@@ -614,7 +614,7 @@ function hasPosPrefix(label: string): boolean {
 
 /** Dedup key for a trade leg — a position prefix ("DT ") doesn't make it a
  * different leg than a mention of the same player without one. */
-function legKeyOf(r: RawFact): string {
+export function legKeyOf(r: RawFact): string {
   return `${nameKey(stripPos(r.player))}|${r.legKind}`;
 }
 
@@ -645,8 +645,42 @@ function buildTradeDetail(outLegs: FactLeg[], inLegs: FactLeg[], team: string): 
   return `Bears complete a trade with the ${team}.`;
 }
 
+/**
+ * The regex extractor has no concept of grammatical subject, so a sentence
+ * phrased from the counterparty's point of view can flip a leg's direction —
+ * the same real person then shows up as both an outgoing AND an incoming leg
+ * of the same deal (e.g. "Clark Phillips III" traded out, "CB Clark Phillips"
+ * acquired in). Resolve every such conflict deterministically, before the
+ * Gemini editor pass ever runs, so the desk is correct even if that pass is
+ * unavailable: prefer the direction with more corroborating mentions, then
+ * official-source mentions over wire-derived ones, then the longer (more
+ * descriptive) sentence.
+ */
+export function resolveDirectionConflicts(group: RawFact[], outgoing: Map<string, RawFact>, incoming: Map<string, RawFact>): void {
+  for (const key of new Set([...outgoing.keys(), ...incoming.keys()])) {
+    const outR = outgoing.get(key);
+    const inR = incoming.get(key);
+    if (!outR || !inR) continue; // no conflict on this leg
+
+    const outCount = group.filter((r) => legKeyOf(r) === key && r.direction === "out").length;
+    const inCount = group.filter((r) => legKeyOf(r) === key && r.direction === "in").length;
+
+    let keepOut: boolean;
+    if (outCount !== inCount) {
+      keepOut = outCount > inCount;
+    } else if ((outR.kind === "official") !== (inR.kind === "official")) {
+      keepOut = outR.kind === "official";
+    } else {
+      keepOut = outR.quote.length >= inR.quote.length;
+    }
+
+    if (keepOut) incoming.delete(key);
+    else outgoing.delete(key);
+  }
+}
+
 /** Merge every leg of one deal (same counterparty team) into a single Fact. */
-function buildTradeFact(group: RawFact[]): Fact {
+export function buildTradeFact(group: RawFact[]): Fact {
   const team = group[0].counterpartyTeam as string;
 
   const outgoing = new Map<string, RawFact>();
@@ -661,6 +695,8 @@ function buildTradeFact(group: RawFact[]): Fact {
       bucket.set(key, r);
     }
   }
+
+  resolveDirectionConflicts(group, outgoing, incoming);
 
   const outLegs = [...outgoing.values()].map((r) => mkLeg(r, "out"));
   const inLegs = [...incoming.values()].map((r) => mkLeg(r, "in"));
@@ -725,7 +761,7 @@ function buildSoloFact(group: RawFact[]): Fact {
   };
 }
 
-function promote(all: RawFact[]): { facts: Fact[]; mergeLog: { key: string; from: number; to: number }[] } {
+export function promote(all: RawFact[]): { facts: Fact[]; mergeLog: { key: string; from: number; to: number }[] } {
   const mergeLog: { key: string; from: number; to: number }[] = [];
   const facts: Fact[] = [];
 
@@ -738,8 +774,14 @@ function promote(all: RawFact[]): { facts: Fact[]; mergeLog: { key: string; from
     list.push(r);
     tradeGroups.set(key, list);
   }
+  // Every leg identity already covered by a team-matched trade Fact, so a
+  // team-less mention of the same person/pick (below) corroborates it
+  // instead of spawning a second "Bears acquire X" Fact for the same event.
+  const coveredLegKeys = new Map<string, Fact>();
   for (const [key, group] of tradeGroups) {
-    facts.push(buildTradeFact(group));
+    const fact = buildTradeFact(group);
+    facts.push(fact);
+    for (const r of group) coveredLegKeys.set(legKeyOf(r), fact);
     // "facts collapsed from N -> 1" counts distinct legs (Dexter, Phillips,
     // the 5th = 3), not raw corroborating sentence hits across sources.
     const distinctLegs = new Set(group.map((r) => legKeyOf(r))).size;
@@ -752,6 +794,16 @@ function promote(all: RawFact[]): { facts: Fact[]; mergeLog: { key: string; from
   const tradeNoTeam = all.filter((r) => r.type === "trade" && !r.counterpartyTeam);
   const soloTradeGroups = new Map<string, RawFact[]>();
   for (const r of tradeNoTeam) {
+    const covering = coveredLegKeys.get(legKeyOf(r));
+    if (covering) {
+      // Same person/pick already named as a leg of a team-matched trade —
+      // this sentence just didn't happen to name the counterparty. It's
+      // corroboration for that one event, not a second trade.
+      if (!covering.refs.some((ref) => ref.quote === r.quote)) {
+        covering.refs.push({ source: r.source, url: r.url, quote: r.quote });
+      }
+      continue;
+    }
     const key = `${nameKey(r.player)}|trade`;
     const list = soloTradeGroups.get(key) ?? [];
     list.push(r);
