@@ -97,6 +97,45 @@ export const PLAYERS = [
   "Ryan Poles",
 ];
 
+// ---- Fan-noise blocklist ---------------------------------------------------
+// Affiliate/listicle/aggregator accounts that farm engagement off Bears news
+// without adding anything — never a source, never allowed into Fight or
+// Traveling-fastest, however much engagement they draw.
+export const FAN_BLOCKLIST_HANDLES = [
+  "ChatSports",
+  "ChartSports",
+  "CommishExempt",
+];
+
+// Phrase patterns that mark a post as aggregator/listicle spam regardless of
+// which handle posted it (these accounts get cloned and renamed constantly).
+export const FAN_BLOCKLIST_PHRASES = [
+  /more chicago bears news/i,
+  /\bmore watch\b/i,
+  /commish exempt/i,
+];
+
+// Photo-agency captions that end up glued to headlines when a post embeds a
+// wire photo. Stripped from any surfaced text (beat rail, fight tweets),
+// never treated as part of the sentence.
+export const PHOTO_CREDIT_PATTERNS = [
+  /\bimagn\b/gi,
+  /\breuters connect\b/gi,
+  /\bvia reuters\b/gi,
+  /\bgetty images?\b/gi,
+  /\bap photo\b/gi,
+  /\bassociated press photo\b/gi,
+  /\busa today sports\b/gi,
+  /photo credit:?[^.]*/gi,
+];
+
+// Known photographer bylines that show up glued to the front of a headline.
+export const PHOTO_CREDIT_BYLINES = [
+  "Katie Stratman",
+  "Joseph Maiorana",
+  "Denny Simmons",
+];
+
 const BEAT_SCOPE = "(Bears OR #DaBears OR Halas OR Poles OR Dexter OR 53)";
 
 /** Query 2 for a given slice of the beat desk. */

@@ -3,6 +3,7 @@ import { QUERIES } from "@/lib/config";
 import { gateCollect, recordReads, spendSummary, LIMITS } from "@/lib/spend";
 import { canRead, recentSearch, searchBeatDesk } from "@/lib/x";
 import { scorePost } from "@/lib/rank";
+import { isBlockedFanAccount } from "@/lib/filter";
 import { synthesize, draftFromFact } from "@/lib/synthesize";
 import { getFacts } from "@/lib/facts";
 import { readPulse, writePulse, readQueue, writeQueue } from "@/lib/store";
@@ -93,12 +94,21 @@ async function runCollect(req: NextRequest): Promise<NextResponse> {
   const seen = new Set<string>();
   raw = raw.filter((p) => (seen.has(p.id) ? false : (seen.add(p.id), true)));
 
-  // bill for every post X returned (dropped still billed, never refetched)
+  // bill for every post X returned (dropped still billed, never refetched) —
+  // the blocklist below is a display filter, not a re-fetch, so it never
+  // touches billing.
   await recordReads(fetched);
+
+  // fan-noise blocklist: affiliate/listicle spam never reaches Fight or
+  // Traveling fastest, no matter how much engagement it drew.
+  const preBlock = raw.length;
+  raw = raw.filter((p) => !isBlockedFanAccount(p.authorHandle, p.text));
+  const blocklistDropped = preBlock - raw.length;
 
   console.log(
     `[collect] facts=${factsBundle.facts.length}(cache=${factsBundle.fromCache}) ` +
-      `x.fetched=${fetched} x.kept=${raw.length} x.dropped=${dropped} beatHalf=${beatHalf}`,
+      `x.fetched=${fetched} x.kept=${raw.length} x.dropped=${dropped} ` +
+      `blocklist=${blocklistDropped} beatHalf=${beatHalf}`,
   );
 
   const scored = raw.map(scorePost);
@@ -111,8 +121,9 @@ async function runCollect(req: NextRequest): Promise<NextResponse> {
         factSources: factsBundle.sources,
         factsFetchedAt: factsBundle.fetchedAt,
         factsFromCache: factsBundle.fromCache,
+        mergeLog: factsBundle.mergeLog,
         posts: scored,
-        xMeta: { fetched, kept: scored.length, dropped, beatHalf },
+        xMeta: { fetched, kept: scored.length, dropped, beatHalf, blocklistDropped },
       })
     : fallbackPulse();
 
@@ -144,9 +155,11 @@ async function runCollect(req: NextRequest): Promise<NextResponse> {
     ok: true,
     facts: pulse.facts.length,
     factCounts: pulse.admin.factCounts,
+    mergeLog: pulse.admin.mergeLog,
     fetched,
     kept: scored.length,
     dropped,
+    blocklistDropped,
     beatHalf,
     draftsQueued,
     pulse,

@@ -6,19 +6,18 @@ import type {
   BeatItem,
   FanCluster,
   PlayerTile,
-  PairedQuote,
   ViralCard,
 } from "./types";
 import { stripUrls, extractRosterNames } from "./rank";
+import { stripPhotoCredit, isCreditOnlyPost, isHeadcountOnlyNoise } from "./filter";
 
 const HEADER_LINE = "Facts from official/beat pages. X is the argument.";
 
+// Links stripped, then wire-photo credit captions ("IMAGN", a photographer
+// byline glued to the front of a headline) stripped — applied everywhere text
+// is surfaced verbatim (beat rail, fight tweets, viral cards).
 function clean(text: string): string {
-  return stripUrls(text).replace(/\s+/g, " ").trim();
-}
-
-function firstName(full: string): string {
-  return full.split(" ")[0];
+  return stripPhotoCredit(stripUrls(text)).replace(/\s+/g, " ").trim();
 }
 
 function lastName(full: string): string {
@@ -36,6 +35,23 @@ function assertsMove(text: string): boolean {
 
 function assertedNames(text: string): string[] {
   return assertsMove(text) ? extractRosterNames(text) : [];
+}
+
+/** Every named leg (players only, not picks) across confirmed facts — the
+ * only source of "named player" tokens for Fight clusters and tiles. A player
+ * with no confirmed fact and no beat coverage never seeds a cluster: this is
+ * the fix for off-desk speculation ("Kyler comeback") riding into the Fight
+ * pane on volume alone. */
+function factPlayerLabels(facts: Fact[]): string[] {
+  const out: string[] = [];
+  for (const f of facts) {
+    if (f.legs && f.legs.length) {
+      for (const leg of f.legs) if (leg.kind === "player") out.push(leg.label);
+    } else if (f.player) {
+      out.push(f.player);
+    }
+  }
+  return out;
 }
 
 // ---- fan argument clustering ----------------------------------------------
@@ -67,21 +83,15 @@ function tensionLine(posts: ScoredPost[]): string {
   return "Fans are chewing on it, no clear side yet.";
 }
 
-function buildFanArgument(
-  fanPosts: ScoredPost[],
-  confirmedFacts: Fact[],
-  beatNames: string[],
-): FanCluster[] {
+const MAX_FIGHT_CLUSTERS = 3;
+
+function buildFanArgument(fanPosts: ScoredPost[], confirmedFacts: Fact[]): FanCluster[] {
   if (fanPosts.length === 0) return [];
 
-  const factPlayers = confirmedFacts.map((f) => f.player).filter((p): p is string => !!p);
-  const tokens = [
-    ...new Set([
-      ...factPlayers.map(lastName),
-      ...beatNames.map(lastName),
-      ...FIXED_TOKENS,
-    ]),
-  ];
+  const factPlayers = factPlayerLabels(confirmedFacts);
+  // NOTE: no beat-mention-derived names here — a name only becomes a cluster
+  // token via a confirmed fact or one of the fixed desk topics.
+  const tokens = [...new Set([...factPlayers.map(lastName), ...FIXED_TOKENS])];
 
   // assign each post to the tokens it matches
   const buckets = new Map<string, ScoredPost[]>();
@@ -122,7 +132,7 @@ function buildFanArgument(
 
       return {
         cluster: {
-          label: tokenLabel(tok, [...factPlayers, ...beatNames]),
+          label: tokenLabel(tok, factPlayers),
           tension: tensionLine(posts),
           authors,
           tweets: top.map((p) => ({ handle: p.authorHandle, text: clean(p.text) })),
@@ -134,7 +144,7 @@ function buildFanArgument(
     })
     .filter((c) => c.authors >= 2)
     .sort((a, b) => b.authors - a.authors || b.gravity - a.gravity)
-    .slice(0, 5)
+    .slice(0, MAX_FIGHT_CLUSTERS)
     .map((c) => c.cluster);
 
   return clusters;
@@ -146,12 +156,22 @@ function buildPlayerTiles(facts: Fact[], beatPosts: ScoredPost[]): PlayerTile[] 
   const tiles = new Map<string, PlayerTile>();
 
   for (const f of facts) {
-    if (!f.player) continue;
-    tiles.set(f.player.toLowerCase(), {
-      name: f.player,
-      status: f.type,
-      detail: f.detail,
-    });
+    if (f.legs && f.legs.length) {
+      for (const leg of f.legs) {
+        if (leg.kind !== "player") continue;
+        tiles.set(leg.label.toLowerCase(), {
+          name: leg.label,
+          status: f.type,
+          detail: leg.status,
+        });
+      }
+    } else if (f.player) {
+      tiles.set(f.player.toLowerCase(), {
+        name: f.player,
+        status: f.type,
+        detail: f.detail,
+      });
+    }
   }
 
   // names in >= 2 beat posts this collect
@@ -176,40 +196,27 @@ function buildPlayerTiles(facts: Fact[], beatPosts: ScoredPost[]): PlayerTile[] 
   return [...tiles.values()].slice(0, 8);
 }
 
-// ---- media vs fan (confirmed events only) --------------------------------
+// ---- creator prompts / sticky assignment strip -----------------------------
+// One prompt per confirmed EVENT (facts are already merged one-per-deal by
+// promote(), so this never restates the same trade twice). The optional
+// second line points at a Fight cluster, clearly labeled as not a source —
+// never a second confirmed-fact prompt.
 
-function buildMediaVsFan(
-  confirmedFacts: Fact[],
-  beatPosts: ScoredPost[],
-  fanPosts: ScoredPost[],
-): PairedQuote[] {
-  const out: PairedQuote[] = [];
-  for (const f of confirmedFacts) {
-    if (!f.player) continue;
-    const last = lastName(f.player).toLowerCase();
-    const b = beatPosts.find((p) => p.text.toLowerCase().includes(last));
-    const fan = fanPosts.find((p) => p.text.toLowerCase().includes(last));
-    if (b && fan) {
-      out.push({
-        event: f.detail,
-        beat: { handle: b.authorHandle, text: clean(b.text) },
-        fan: { handle: fan.authorHandle, text: clean(fan.text) },
-      });
-    }
-  }
-  return out;
-}
-
-// ---- creator prompts ----------------------------------------------------
-
-function buildPrompts(confirmedFacts: Fact[]): string[] {
+function buildPrompts(confirmedFacts: Fact[], fanArgument: FanCluster[]): string[] {
   if (confirmedFacts.length === 0) return ["Nothing confirmed. Don't tweet a rumor."];
-  return confirmedFacts
-    .slice(0, 2)
-    .map(
-      (f) =>
-        `Explain "${f.detail}" in 90 seconds. Do not add names that are not on this desk.`,
+
+  const newest = confirmedFacts[0];
+  const prompts = [
+    `Explain "${newest.detail}" in 90 seconds. Do not add names that are not on this desk.`,
+  ];
+
+  const cluster = fanArgument[0];
+  if (cluster) {
+    prompts.push(
+      `Here's the fight — ${cluster.label}. Do not treat fan posts as a source.`,
     );
+  }
+  return prompts;
 }
 
 // ---- headline / summary -----------------------------------------------------
@@ -232,26 +239,32 @@ export interface SynthesizeInput {
   factSources: FactSourceResult[];
   factsFetchedAt: string;
   factsFromCache: boolean;
-  posts: ScoredPost[]; // all kept X posts (fan + beat)
-  xMeta: { fetched: number; kept: number; dropped: number; beatHalf: string };
+  mergeLog: { key: string; from: number; to: number }[];
+  posts: ScoredPost[]; // all kept X posts (fan + beat), blocklist already applied
+  xMeta: { fetched: number; kept: number; dropped: number; beatHalf: string; blocklistDropped: number };
 }
 
 export function synthesize(input: SynthesizeInput): PulsePayload {
-  const { facts, factSources, factsFetchedAt, factsFromCache, posts, xMeta } = input;
+  const { facts, factSources, factsFetchedAt, factsFromCache, mergeLog, posts, xMeta } = input;
 
   const now = new Date().toISOString();
 
   const beatPosts = posts.filter((p) => p.isBeat);
-  const fanPosts = posts.filter((p) => !p.isBeat);
+  // "cut 12 players" with nobody named carries no signal — never worth a
+  // Fight cluster or a spot in Traveling fastest.
+  const fanPosts = posts.filter(
+    (p) => !p.isBeat && !isHeadcountOnlyNoise(p.text, extractRosterNames(p.text)),
+  );
 
   const uiFacts = facts.filter((f) => f.confidence !== "note");
   const confirmedFacts = facts.filter((f) => f.confidence === "confirmed");
   const disputedFacts = facts.filter((f) => f.confidence === "disputed");
   const noteFacts = facts.filter((f) => f.confidence === "note");
 
-  // beat rail — verbatim, newest first
+  // beat rail — verbatim (credit captions stripped), newest first
   const beat: BeatItem[] = beatPosts
     .slice()
+    .filter((p) => !isCreditOnlyPost(p.text))
     .sort((a, b) => +new Date(b.createdAt) - +new Date(a.createdAt))
     .slice(0, 8)
     .map((p) => ({
@@ -261,15 +274,12 @@ export function synthesize(input: SynthesizeInput): PulsePayload {
       createdAt: p.createdAt,
     }));
 
-  const beatNames = [...new Set(beatPosts.flatMap((p) => extractRosterNames(p.text)))];
-
   const players = buildPlayerTiles(uiFacts, beatPosts);
-  const fanArgument = buildFanArgument(fanPosts, confirmedFacts, beatNames);
-  const mediaVsFan = buildMediaVsFan(confirmedFacts, beatPosts, fanPosts);
-  const creatorPrompts = buildPrompts(confirmedFacts);
+  const fanArgument = buildFanArgument(fanPosts, confirmedFacts);
+  const creatorPrompts = buildPrompts(confirmedFacts, fanArgument);
 
   const confirmedNames = new Set(
-    confirmedFacts.map((f) => (f.player ? lastName(f.player).toLowerCase() : "")),
+    factPlayerLabels(confirmedFacts).map((p) => lastName(p).toLowerCase()),
   );
   const viral: ViralCard[] = fanPosts
     .slice()
@@ -303,7 +313,9 @@ export function synthesize(input: SynthesizeInput): PulsePayload {
     fanArgument,
     players,
     creatorPrompts,
-    mediaVsFan,
+    // Retired — pairing a Bears-side fact with an unrelated fan/media post
+    // from the other side of a trade misrepresented them as the same event.
+    mediaVsFan: [],
     viral,
     admin: {
       factSources,
@@ -313,9 +325,10 @@ export function synthesize(input: SynthesizeInput): PulsePayload {
         note: noteFacts.length,
       },
       notes: noteFacts,
-      x: xMeta,
+      x: { ...xMeta },
       factsFetchedAt,
       factsFromCache,
+      mergeLog,
     },
   };
 }
