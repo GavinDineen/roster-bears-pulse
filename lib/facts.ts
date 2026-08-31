@@ -1,5 +1,4 @@
 import { kvGetJSON, kvSetJSON } from "./kv";
-import { extractTradeLegsLLM } from "./llmExtract";
 import type { Fact, FactLeg, FactRef, FactSourceResult, FactType, FactConfidence } from "./types";
 
 // FACT PIPE — $0 X. Scrapes official / beat transaction pages for confirmed
@@ -509,31 +508,25 @@ async function extractSource(src: {
       if (!ANNOUNCEMENT.test(s)) continue;
 
       if (TRADE_VERB_RE.test(s)) {
-        // ---- trade sentence: LLM structured extraction first, regex fallback second ----
-        // The regex path (sentenceTeamOf/parseTradeSentence/extractTradeLegsFallback) has
-        // no concept of grammatical subject, so it cannot tell a Bears-perspective sentence
-        // from an opponent-perspective one — that's what produced the Clark Phillips III
-        // duplicate-leg bug. The LLM call re-reads the same already-scraped sentence and
-        // resolves direction relative to the Bears explicitly. If it's unconfigured or
-        // fails for any reason, behavior falls back to the original regex path unchanged.
-        let team: string | null = null;
-        let legs: { label: string; kind: "player" | "pick"; direction: "in" | "out" }[] = [];
+        // ---- trade sentence: structural parse first, loose fallback second ----
+        // Per-sentence LLM extraction was tried here and retired: the mission
+        // caps Gemini at ONE call per full collect (the editor pass in
+        // lib/editor.ts, run once over the whole assembled wire after
+        // promote()), not one call per sentence. This deterministic path
+        // still has the grammatical-subject blind spot that can produce a
+        // contradictory leg (e.g. the same player as both in and out) when a
+        // source phrases a trade from the opponent's perspective — that's
+        // exactly the class of bug the editor pass merges away downstream.
+        const team = sentenceTeamOf(s);
+        const structural = team ? parseTradeSentence(s) : null;
 
-        const llm = await extractTradeLegsLLM(s);
-        if (llm) {
-          if (!llm.isTrade) continue; // LLM determined this sentence isn't actually a trade
-          team = llm.team;
-          legs = llm.legs;
+        const legs: { label: string; kind: "player" | "pick"; direction: "in" | "out" }[] = [];
+        if (structural) {
+          for (const l of structural.outgoing) legs.push({ ...l, direction: "out" });
+          for (const l of structural.incoming) legs.push({ ...l, direction: "in" });
         } else {
-          team = sentenceTeamOf(s);
-          const structural = team ? parseTradeSentence(s) : null;
-          if (structural) {
-            for (const l of structural.outgoing) legs.push({ ...l, direction: "out" });
-            for (const l of structural.incoming) legs.push({ ...l, direction: "in" });
-          } else {
-            for (const mv of extractTradeLegsFallback(s)) {
-              legs.push({ label: mv.player, kind: "player", direction: mv.direction });
-            }
+          for (const mv of extractTradeLegsFallback(s)) {
+            legs.push({ label: mv.player, kind: "player", direction: mv.direction });
           }
         }
 

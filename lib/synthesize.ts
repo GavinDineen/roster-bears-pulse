@@ -10,6 +10,7 @@ import type {
 } from "./types";
 import { stripUrls, extractRosterNames } from "./rank";
 import { stripPhotoCredit, isCreditOnlyPost, isHeadcountOnlyNoise } from "./filter";
+import { currentCycle } from "./config";
 
 const HEADER_LINE = "Facts from official/beat pages. X is the argument.";
 
@@ -313,6 +314,10 @@ export function synthesize(input: SynthesizeInput): PulsePayload {
     beat,
     fanArgument,
     players,
+    // Placeholders — the collect route always overwrites these via
+    // withBoardAndCycle() right after synthesize() returns.
+    board: null,
+    cycle: currentCycle(0),
     creatorPrompts,
     // Retired — pairing a Bears-side fact with an unrelated fan/media post
     // from the other side of a trade misrepresented them as the same event.

@@ -13,6 +13,7 @@ export interface SpendData {
   monthSpendUsd: number;
   readsToday: number;
   postsToday: number;
+  collectsToday: number; // X-pull attempts today — the $25 float's daily throttle
   readsCostToday: number;
   lastCollectAt: string | null;
   updatedAt: string;
@@ -21,6 +22,11 @@ export interface SpendData {
 export interface Gate {
   ok: boolean;
   reason: string;
+  // true = proceed with facts+board only, do not touch X this cycle (soft
+  // cap crossed, or X read caps otherwise exhausted) — distinct from ok:false,
+  // which blocks the whole collect. Only meaningful for gateCollect(); left
+  // undefined by gateWrite(), which has no facts-only fallback mode.
+  skipX?: boolean;
 }
 
 function num(name: string, fallback: number): number {
@@ -33,7 +39,12 @@ export const LIMITS = {
   monthlyBudgetUsd: () => num("X_MONTHLY_BUDGET_USD", 25),
   maxReadsPerDay: () => num("X_MAX_READS_PER_DAY", 400),
   maxPostsPerDay: () => num("X_MAX_POSTS_PER_DAY", 5),
-  collectEveryMinutes: () => num("X_COLLECT_EVERY_MINUTES", 180),
+  maxCollectsPerDay: () => num("X_MAX_COLLECTS_PER_DAY", 4),
+  collectEveryMinutes: () => num("X_COLLECT_EVERY_MINUTES", 90),
+  // Once projected monthly spend crosses this, X is skipped (facts+board
+  // only) rather than fully blocking the collect — a soft brake before the
+  // hard $25 stop below.
+  softCapUsd: () => num("X_SOFT_CAP_USD", 22),
   maxResultsPerQuery: () => num("X_MAX_RESULTS_PER_QUERY", 20),
   queryCount: () => num("X_QUERY_COUNT", 2),
   viralThreshold: () => num("VIRAL_THRESHOLD", 80),
@@ -52,6 +63,7 @@ function fresh(now = new Date()): SpendData {
     monthSpendUsd: 0,
     readsToday: 0,
     postsToday: 0,
+    collectsToday: 0,
     readsCostToday: 0,
     lastCollectAt: null,
     updatedAt: now.toISOString(),
@@ -82,7 +94,13 @@ export async function loadSpend(): Promise<SpendData> {
     data.day = day;
     data.readsToday = 0;
     data.postsToday = 0;
+    data.collectsToday = 0;
     data.readsCostToday = 0;
+    changed = true;
+  }
+  // Migrate spend records written before collectsToday existed.
+  if (data.collectsToday === undefined) {
+    data.collectsToday = 0;
     changed = true;
   }
   if (changed) await saveSpend(data);
@@ -90,8 +108,12 @@ export async function loadSpend(): Promise<SpendData> {
 }
 
 /**
- * Must pass before any X read (collect). Checks the monthly budget, the daily
- * read cap, the projected cost of the next collect, and the collect throttle.
+ * Must pass before any collect (fact refresh + possible X read). Checks the
+ * monthly budget, the daily collect cap (X_MAX_COLLECTS_PER_DAY — an admin
+ * "Collect now" counts the same as a scheduled one), the daily read cap, the
+ * projected cost of the next collect, the 90-minute throttle between X pulls,
+ * and finally the soft cap: past it, the collect proceeds (facts+board) but
+ * skipX comes back true so the caller never touches X this cycle.
  */
 export async function gateCollect(): Promise<Gate> {
   const s = await loadSpend();
@@ -100,23 +122,17 @@ export async function gateCollect(): Promise<Gate> {
   if (s.monthSpendUsd >= budget) {
     return {
       ok: false,
+      skipX: false,
       reason: `Monthly budget reached ($${s.monthSpendUsd.toFixed(2)} / $${budget.toFixed(2)})`,
     };
   }
 
-  if (s.readsToday >= LIMITS.maxReadsPerDay()) {
+  if (s.collectsToday >= LIMITS.maxCollectsPerDay()) {
     return {
       ok: false,
-      reason: `Daily read cap reached (${s.readsToday} / ${LIMITS.maxReadsPerDay()})`,
+      skipX: false,
+      reason: `Daily collect cap reached (${s.collectsToday} / ${LIMITS.maxCollectsPerDay()})`,
     };
-  }
-
-  const projected =
-    LIMITS.maxResultsPerQuery() *
-    Math.min(2, LIMITS.queryCount()) *
-    COST.read;
-  if (s.monthSpendUsd + projected > budget) {
-    return { ok: false, reason: "Next collect would exceed the monthly budget" };
   }
 
   if (s.lastCollectAt) {
@@ -125,12 +141,33 @@ export async function gateCollect(): Promise<Gate> {
     if (mins < every) {
       return {
         ok: false,
+        skipX: false,
         reason: `Throttled — ${Math.ceil(every - mins)} min until the next collect is allowed`,
       };
     }
   }
 
-  return { ok: true, reason: "ok" };
+  if (s.readsToday >= LIMITS.maxReadsPerDay()) {
+    return { ok: true, skipX: true, reason: `Daily read cap reached (${s.readsToday} / ${LIMITS.maxReadsPerDay()}) — facts+board only` };
+  }
+
+  if (s.monthSpendUsd >= LIMITS.softCapUsd()) {
+    return {
+      ok: true,
+      skipX: true,
+      reason: `Soft cap reached ($${s.monthSpendUsd.toFixed(2)} / $${LIMITS.softCapUsd().toFixed(2)}) — facts+board only`,
+    };
+  }
+
+  const projected =
+    LIMITS.maxResultsPerQuery() *
+    Math.min(2, LIMITS.queryCount()) *
+    COST.read;
+  if (s.monthSpendUsd + projected > budget) {
+    return { ok: true, skipX: true, reason: "Next X pull would exceed the monthly budget — facts+board only" };
+  }
+
+  return { ok: true, skipX: false, reason: "ok" };
 }
 
 /** Must pass before any X write (post). */
@@ -161,13 +198,19 @@ export async function gateWrite(hasUrl: boolean): Promise<Gate> {
   return { ok: true, reason: "ok" };
 }
 
-/** Record `count` posts returned from a read. Also stamps lastCollectAt. */
+/**
+ * Record `count` posts returned from a read, stamp lastCollectAt, and count
+ * this as one of today's X_MAX_COLLECTS_PER_DAY collects. Called once per
+ * collect that actually reached X — never for a facts-only (skipX) cycle,
+ * so those don't burn a slot or start the 90-minute throttle.
+ */
 export async function recordReads(count: number): Promise<SpendData> {
   const s = await loadSpend();
   const cost = count * COST.read;
   s.readsToday += count;
   s.readsCostToday += cost;
   s.monthSpendUsd += cost;
+  s.collectsToday += 1;
   s.lastCollectAt = new Date().toISOString();
   await saveSpend(s);
   return s;
@@ -195,6 +238,9 @@ export async function spendSummary() {
     readsCostToday: Number(s.readsCostToday.toFixed(4)),
     postsToday: s.postsToday,
     maxPostsPerDay: LIMITS.maxPostsPerDay(),
+    collectsToday: s.collectsToday,
+    maxCollectsPerDay: LIMITS.maxCollectsPerDay(),
+    softCapUsd: LIMITS.softCapUsd(),
     lastCollectAt: s.lastCollectAt,
     collectEveryMinutes: LIMITS.collectEveryMinutes(),
     costModel: COST,

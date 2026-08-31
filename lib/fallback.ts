@@ -1,9 +1,12 @@
+import { currentCycle } from "./config";
 import type { PulsePayload } from "./types";
 
 /**
  * Used ONLY when both the FACTS layer and the X layer come back empty. No
  * fabricated moves, no invented player copy — just an honest "nothing live"
- * state, labeled as cached context.
+ * state, labeled as cached context. `board`/`cycle` are attached afterward by
+ * the caller (withBoardAndCycle) — set here to safe placeholders so this is a
+ * valid PulsePayload even if a caller forgets that step.
  */
 export function fallbackPulse(): PulsePayload {
   const now = new Date().toISOString();
@@ -17,6 +20,8 @@ export function fallbackPulse(): PulsePayload {
     beat: [],
     fanArgument: [],
     players: [],
+    board: null,
+    cycle: currentCycle(0),
     creatorPrompts: ["Nothing confirmed. Don't tweet a rumor."],
     mediaVsFan: [],
     viral: [],

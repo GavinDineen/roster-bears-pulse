@@ -117,6 +117,25 @@ export interface ViralCard {
   unverified: boolean; // claims a move not on the desk
 }
 
+// ---- FREE BOARD (ESPN public JSON + weather.gov, not X, not billed) ----
+
+export interface Board {
+  record: string; // e.g. "3-2"
+  next: { opponent: string; isHome: boolean; kickoffIso: string } | null;
+  last: { result: "W" | "L" | "T"; score: string; opponent: string } | null;
+  weatherF: number | null; // Soldier Field temp at kickoff — home games only
+}
+
+// One collect cycle out of the 4 scheduled full collects/day (America/Chicago
+// 06:30, 12:00, 17:15, 22:00). n counts actual collects consumed today
+// (X_MAX_COLLECTS_PER_DAY) — an admin "Collect now" advances it exactly like
+// a scheduled one. Shown to every signed-in role, not just admin.
+export interface CycleStatus {
+  n: number;
+  of: number;
+  nextAt: string; // ISO — next scheduled collect time
+}
+
 // ---- admin-only ----
 
 export interface AdminMeta {
@@ -148,6 +167,8 @@ export interface PulsePayload {
   beat: BeatItem[];
   fanArgument: FanCluster[];
   players: PlayerTile[];
+  board: Board | null; // null when ESPN/schedule couldn't be read — fail closed
+  cycle: CycleStatus;
   creatorPrompts: string[]; // ≤ 2 — also the sticky assignment strip
   // Retired: pairing a Bears-side confirmed fact with an off-topic fan/media
   // post from the other side of a trade misrepresented them as one event.

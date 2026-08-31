@@ -154,6 +154,77 @@ export function pickBeatHalf(): "even" | "odd" {
   return Math.floor(Date.now() / 60_000 / every) % 2 === 0 ? "even" : "odd";
 }
 
+// ---- collect clock — 4 full collects/day, America/Chicago -----------------
+// 06:30 · 12:00 · 17:15 · 22:00 CT. Vercel Hobby cron can't fire more than
+// once/day, so a GitHub Actions schedule (.github/workflows/desk-collect.yml)
+// drives these four; this is the shared source of truth both that workflow
+// and the member-facing "cycle N/4 · NEXT" clock are built from.
+
+export const CLOCK_TIMES_CT: [number, number][] = [
+  [6, 30],
+  [12, 0],
+  [17, 15],
+  [22, 0],
+];
+
+interface CivilDate {
+  year: number;
+  month: number; // 1-12
+  day: number;
+}
+
+function chicagoCivilDate(instant: Date): CivilDate {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: "America/Chicago",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(instant);
+  const get = (t: string) => Number(parts.find((p) => p.type === t)?.value);
+  return { year: get("year"), month: get("month"), day: get("day") };
+}
+
+/** The UTC instant for a wall-clock hour:minute on `date` in America/Chicago (DST-safe). */
+function ctWallClockToUtc(date: CivilDate, hour: number, minute: number): Date {
+  const targetAsUtcMs = Date.UTC(date.year, date.month - 1, date.day, hour, minute);
+  let guessMs = targetAsUtcMs;
+  // Two passes converge even right around a DST transition.
+  for (let i = 0; i < 2; i++) {
+    const wallAtGuess = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/Chicago",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      hour12: false,
+    }).formatToParts(new Date(guessMs));
+    const get = (t: string) => Number(wallAtGuess.find((p) => p.type === t)?.value);
+    const hh = get("hour") === 24 ? 0 : get("hour");
+    const asUtcMs = Date.UTC(get("year"), get("month") - 1, get("day"), hh, get("minute"));
+    guessMs += targetAsUtcMs - asUtcMs;
+  }
+  return new Date(guessMs);
+}
+
+/**
+ * Where we are in today's 4-collect cycle. `n` is actual collects consumed
+ * today (spend.ts's collectsToday — an admin "Collect now" counts the same
+ * as a scheduled one); `nextAt` is the next of the 4 CT times, rolling to
+ * tomorrow's 06:30 once all four have passed.
+ */
+export function currentCycle(collectsToday: number, now = new Date()): { n: number; of: number; nextAt: string } {
+  const todayCT = chicagoCivilDate(now);
+  const todaysTimes = CLOCK_TIMES_CT.map(([h, m]) => ctWallClockToUtc(todayCT, h, m));
+  const next = todaysTimes.find((t) => t.getTime() > now.getTime());
+  if (next) return { n: Math.min(collectsToday, 4), of: 4, nextAt: next.toISOString() };
+
+  // All 4 have passed today — roll to tomorrow's 06:30 CT.
+  const tomorrowCT = chicagoCivilDate(new Date(todaysTimes[0].getTime() + 24 * 60 * 60 * 1000));
+  const [h0, m0] = CLOCK_TIMES_CT[0];
+  return { n: Math.min(collectsToday, 4), of: 4, nextAt: ctWallClockToUtc(tomorrowCT, h0, m0).toISOString() };
+}
+
 // Query 1: fans / team, football-locked.
 // Query 2: local beat desk only — ONE search.
 export const QUERIES: { key: string; label: string; query: string }[] = [

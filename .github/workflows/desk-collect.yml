@@ -1,0 +1,54 @@
+name: Desk collect (4x/day, America/Chicago)
+
+# Vercel's Hobby-plan cron can only fire once/day (±59min), which can't hit
+# the desk's 4-collect schedule (06:30 · 12:00 · 17:15 · 22:00 CT — see
+# lib/config.ts's CLOCK_TIMES_CT, the single source of truth this mirrors).
+# GitHub Actions cron is UTC-only and can't shift with DST, so this lists
+# BOTH the CDT and CST UTC equivalents of all 4 times (8 firings/day) and
+# the job itself checks the real America/Chicago clock before calling
+# collect — only the firing that lands on a real target time (within a
+# small tolerance for scheduler drift) actually calls the endpoint, so
+# exactly ~4 real collects happen per day year-round with no manual
+# seasonal edits.
+
+on:
+  workflow_dispatch: {}
+  schedule:
+    # ---- CDT (UTC-5): 06:30 · 12:00 · 17:15 · 22:00 CT ----
+    - cron: "30 11 * * *"
+    - cron: "0 17 * * *"
+    - cron: "15 22 * * *"
+    - cron: "0 3 * * *"
+    # ---- CST (UTC-6): 06:30 · 12:00 · 17:15 · 22:00 CT ----
+    - cron: "30 12 * * *"
+    - cron: "0 18 * * *"
+    - cron: "15 23 * * *"
+    - cron: "0 4 * * *"
+
+jobs:
+  collect:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Only proceed at a real 06:30/12:00/17:15/22:00 CT slot
+        id: gate
+        run: |
+          minutes_now=$(TZ="America/Chicago" date +%H:%M | awk -F: '{print $1*60+$2}')
+          targets="390 720 1035 1320" # 06:30 12:00 17:15 22:00 in minutes-since-midnight
+          best=9999
+          for t in $targets; do
+            diff=$(( minutes_now - t ))
+            [ $diff -lt 0 ] && diff=$(( -diff ))
+            [ $diff -lt $best ] && best=$diff
+          done
+          echo "closest target is $best minute(s) away (CT time: $(TZ="America/Chicago" date +%H:%M))"
+          if [ "$best" -le 10 ]; then
+            echo "should_run=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_run=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Call /api/cron
+        if: steps.gate.outputs.should_run == 'true'
+        run: |
+          curl -sS -f -X GET "https://bears.therostercollective.com/api/cron?secret=${{ secrets.CRON_SECRET }}" \
+            -o /dev/null -w "collect responded: %{http_code}\n"
