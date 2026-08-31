@@ -12,7 +12,12 @@ name: Desk collect (4x/day, America/Chicago)
 # seasonal edits.
 
 on:
-  workflow_dispatch: {}
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Skip the CT-time gate and call /api/cron immediately (manual ops test)"
+        type: boolean
+        default: false
   schedule:
     # ---- CDT (UTC-5): 06:30 · 12:00 · 17:15 · 22:00 CT ----
     - cron: "30 11 * * *"
@@ -41,7 +46,7 @@ jobs:
             [ $diff -lt $best ] && best=$diff
           done
           echo "closest target is $best minute(s) away (CT time: $(TZ="America/Chicago" date +%H:%M))"
-          if [ "$best" -le 10 ]; then
+          if [ "${{ inputs.force }}" = "true" ] || [ "$best" -le 10 ]; then
             echo "should_run=true" >> "$GITHUB_OUTPUT"
           else
             echo "should_run=false" >> "$GITHUB_OUTPUT"
