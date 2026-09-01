@@ -26,7 +26,7 @@ closed to the regex path, and must stay that way.
 - `lib/kv.ts` — storage: Upstash Redis on Vercel (`KV_REST_API_*`), local `.data/*.json` fallback.
 - `lib/store.ts` — `readPulse`/`writePulse`, `readQueue`/`writeQueue`.
 - `lib/service-auth.ts` — `isServiceRequest` (shared `DESK_SERVICE_SECRET`), `isCronRequest` (`CRON_SECRET`).
-- `services/x-scrape/` — standalone Python (FastAPI + twscrape) sidecar, deployed separately (Fly.io). Only called from `/api/collect`. Burner X accounts, ToS/ban risk — see its README.
+- `services/x-scrape/` — standalone Python (FastAPI + twscrape) sidecar, deployed separately (Render free tier via `render.yaml`, or Fly). Account DB rebuilt from `X_SCRAPE_COOKIES` each boot. Only called from `/api/collect`; `desk-collect.yml` wakes it first. Burner X accounts, ToS/ban risk — see its README.
 - `app/api/collect` — the only route that reads/writes X: twscrape (or official fallback) + scrape facts → synthesize → write pulse + queue.
 - `app/api/cron` — Vercel Cron (daily `0 13 * * *`) → forwards to `/api/collect`.
 - `app/api/pulse|queue|spend` — read-only, service-auth'd, never trigger a collect.

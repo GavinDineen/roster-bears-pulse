@@ -18,6 +18,7 @@ at least one login-flow account was added.
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 from twscrape import API
 
@@ -46,6 +47,10 @@ def _split_cookie_line(line: str) -> tuple[str, str] | None:
 
 
 async def bootstrap_pool(db_path: str) -> API:
+    parent = Path(db_path).parent
+    if str(parent):
+        parent.mkdir(parents=True, exist_ok=True)
+
     # raise_when_no_account: surface "no usable account" to the caller as an
     # error (→ HTTP 503) instead of silently returning zero tweets, so the Next
     # service falls back to the official X API. wait_timeout keeps a short grace

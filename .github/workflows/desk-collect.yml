@@ -52,6 +52,24 @@ jobs:
             echo "should_run=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # The twscrape sidecar (Render free tier) sleeps after ~15 min idle. Wake
+      # it before the collect so the in-route /search call isn't racing a cold
+      # start. Best-effort: if it doesn't come up, the collect just falls back
+      # to the official X API for this cycle. Skipped when the var is unset.
+      - name: Wake the twscrape sidecar
+        if: steps.gate.outputs.should_run == 'true' && vars.X_SCRAPE_SERVICE_URL != ''
+        continue-on-error: true
+        run: |
+          base="${{ vars.X_SCRAPE_SERVICE_URL }}"
+          echo "pinging ${base%/}/ …"
+          for i in $(seq 1 30); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 10 "${base%/}/" || true)
+            echo "  attempt $i: $code"
+            [ "$code" = "200" ] && echo "sidecar awake" && exit 0
+            sleep 3
+          done
+          echo "sidecar did not wake in time — collect will fall back to the official API"
+
       - name: Call /api/cron
         if: steps.gate.outputs.should_run == 'true'
         run: |

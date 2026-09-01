@@ -58,6 +58,30 @@ curl -s -XPOST localhost:8080/search \
   -d '{"query":"\"Chicago Bears\" -is:retweet lang:en","limit":20}' | jq '.count'
 ```
 
+## Deploy (Render — free, no card)
+
+1. Push this branch. In the [Render dashboard](https://dashboard.render.com):
+   **New → Blueprint**, pick this repo. Render reads `render.yaml` at the repo
+   root and creates the `bears-x-scrape` web service (Docker, root dir
+   `services/x-scrape`, free plan).
+2. On the service's **Environment** tab set:
+   - `X_SCRAPE_SERVICE_SECRET` — a long random string.
+   - `X_SCRAPE_COOKIES` — `burner1│auth_token=…; ct0=…` (one line per account).
+3. First deploy runs automatically. **Logs** should show
+   `[accounts] pool ready: 1/1 active`.
+4. In the Vercel project for this repo set `X_SCRAPE_SERVICE_URL` to the
+   `https://bears-x-scrape.onrender.com` URL and `X_SCRAPE_SERVICE_SECRET` to
+   the same value as step 2.
+5. Add a GitHub Actions **variable** (repo → Settings → Secrets and variables →
+   Actions → Variables) `X_SCRAPE_SERVICE_URL` = that same URL, so
+   `desk-collect.yml` wakes the service before each collect.
+
+The account DB is rebuilt from `X_SCRAPE_COOKIES` on every boot, so the free
+plan's lack of a persistent disk is fine — you only lose twscrape's per-account
+rate-limit lock history across restarts. Free services sleep after ~15 min idle;
+the collect workflow's wake step covers the scheduled runs, and a cold "Collect
+now" from the Roster app just falls back to the official API for that one cycle.
+
 ## Deploy (Fly.io)
 
 ```bash

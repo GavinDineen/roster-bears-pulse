@@ -25,7 +25,10 @@ from twscrape import API, NoAccountError, gather
 from accounts import bootstrap_pool
 from serialize import tweet_to_json
 
-DB_PATH = os.environ.get("TWS_DB", "accounts.db")
+# The account DB is rebuilt from X_SCRAPE_COOKIES on every boot, so it does not
+# need to survive a restart — /tmp is fine on hosts without a persistent disk
+# (Render free tier). Point TWS_DB at a mounted volume if you have one.
+DB_PATH = os.environ.get("TWS_DB", "/tmp/x-scrape/accounts.db")
 SECRET = os.environ.get("X_SCRAPE_SERVICE_SECRET", "")
 # X rejects search queries beyond ~512 chars; mirror the official path's HTTP
 # 400 handling by telling the caller to split the query instead.
@@ -59,6 +62,12 @@ def _api() -> API:
     if api is None:
         raise HTTPException(status_code=503, detail="pool not ready")
     return api
+
+
+@app.get("/")
+async def liveness() -> dict[str, Any]:
+    """Unauthenticated liveness probe for the host's health check. No secrets, no pool."""
+    return {"service": "x-scrape", "ok": True}
 
 
 @app.get("/health")

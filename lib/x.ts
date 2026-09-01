@@ -149,6 +149,11 @@ export async function searchBeatDesk(
 // budget-gated by lib/spend.ts. The sidecar is only ever called from
 // /api/collect — never on page load, never in dev, never in a loop.
 
+function scrapeTimeoutMs(): number {
+  const v = Number(process.env.X_SCRAPE_TIMEOUT_MS);
+  return Number.isFinite(v) && v > 0 ? v : 30_000;
+}
+
 class ScrapeQueryTooLongError extends Error {
   constructor() {
     super("scrape service: query_too_long");
@@ -188,7 +193,9 @@ export async function scrapeSearch(
       limit: clampMaxResults(maxResults),
       kind: "latest",
     }),
-    signal: AbortSignal.timeout(20_000),
+    // Generous default: a free-tier host (Render) can cold-start ~30-60s. A
+    // timeout here just drops us to the official API for this collect.
+    signal: AbortSignal.timeout(scrapeTimeoutMs()),
   });
 
   if (res.status === 422) throw new ScrapeQueryTooLongError();

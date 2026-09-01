@@ -32,6 +32,9 @@ import type { QueuedTweet } from "@/lib/queue-types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// Headroom for a cold twscrape-sidecar call (X_SCRAPE_TIMEOUT_MS, ~30s) on top
+// of facts scrape + the Gemini editor pass. Vercel caps this at the plan limit.
+export const maxDuration = 60;
 
 /** Collect runs for the Roster app (admin action) or Vercel Cron / GitHub Actions. */
 function mayCollect(req: NextRequest): boolean {
