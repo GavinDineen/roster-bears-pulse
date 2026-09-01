@@ -148,6 +148,7 @@ export interface AdminMeta {
     dropped: number;
     beatHalf: string;
     blocklistDropped: number; // fan-spam accounts/phrases dropped this collect
+    source: "scrape" | "official" | "none"; // which read path ran this collect
   };
   factsFetchedAt: string;
   factsFromCache: boolean;

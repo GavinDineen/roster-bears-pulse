@@ -50,6 +50,18 @@ export const LIMITS = {
   viralThreshold: () => num("VIRAL_THRESHOLD", 80),
 };
 
+/**
+ * True when the twscrape sidecar is configured — then X reads are free and the
+ * USD budget / soft cap / read cap / projected-cost checks don't apply to a
+ * collect. The 90-min throttle and the daily collect cap still do. Mirrors
+ * hasScrapeCreds() in lib/x.ts.
+ */
+export function scrapeActive(): boolean {
+  return !!(
+    process.env.X_SCRAPE_SERVICE_URL && process.env.X_SCRAPE_SERVICE_SECRET
+  );
+}
+
 function periodKeys(now = new Date()) {
   const iso = now.toISOString();
   return { month: iso.slice(0, 7), day: iso.slice(0, 10) };
@@ -108,15 +120,12 @@ export async function loadSpend(): Promise<SpendData> {
 }
 
 /**
- * Must pass before any collect (fact refresh + possible X read). Checks the
- * monthly budget, the daily collect cap (X_MAX_COLLECTS_PER_DAY — an admin
- * "Collect now" counts the same as a scheduled one), the daily read cap, the
- * projected cost of the next collect, the 90-minute throttle between X pulls,
- * and finally the soft cap: past it, the collect proceeds (facts+board) but
- * skipX comes back true so the caller never touches X this cycle.
+ * The money-aware half of the gate: monthly budget hard stop, daily read cap,
+ * soft cap, and next-pull projected cost. Returns a blocking/skipX Gate, or
+ * null to proceed. Applies to the official (paid) X path only — bypassed when
+ * the free twscrape sidecar is active.
  */
-export async function gateCollect(): Promise<Gate> {
-  const s = await loadSpend();
+function moneyGate(s: SpendData): Gate | null {
   const budget = LIMITS.monthlyBudgetUsd();
 
   if (s.monthSpendUsd >= budget) {
@@ -125,26 +134,6 @@ export async function gateCollect(): Promise<Gate> {
       skipX: false,
       reason: `Monthly budget reached ($${s.monthSpendUsd.toFixed(2)} / $${budget.toFixed(2)})`,
     };
-  }
-
-  if (s.collectsToday >= LIMITS.maxCollectsPerDay()) {
-    return {
-      ok: false,
-      skipX: false,
-      reason: `Daily collect cap reached (${s.collectsToday} / ${LIMITS.maxCollectsPerDay()})`,
-    };
-  }
-
-  if (s.lastCollectAt) {
-    const mins = (Date.now() - new Date(s.lastCollectAt).getTime()) / 60_000;
-    const every = LIMITS.collectEveryMinutes();
-    if (mins < every) {
-      return {
-        ok: false,
-        skipX: false,
-        reason: `Throttled — ${Math.ceil(every - mins)} min until the next collect is allowed`,
-      };
-    }
   }
 
   if (s.readsToday >= LIMITS.maxReadsPerDay()) {
@@ -167,7 +156,57 @@ export async function gateCollect(): Promise<Gate> {
     return { ok: true, skipX: true, reason: "Next X pull would exceed the monthly budget — facts+board only" };
   }
 
-  return { ok: true, skipX: false, reason: "ok" };
+  return null;
+}
+
+/**
+ * Must pass before any collect (fact refresh + possible X read). The daily
+ * collect cap (X_MAX_COLLECTS_PER_DAY — an admin "Collect now" counts the same
+ * as a scheduled one) and the 90-minute throttle apply to EVERY path. When the
+ * twscrape sidecar is active, reads are free and that's the whole gate. When
+ * it's not, the money checks (monthly budget, read cap, soft cap, projected
+ * cost) also apply — a soft-cap/read-cap/projected hit comes back skipX:true
+ * (collect proceeds facts+board only); a budget hit comes back ok:false.
+ */
+export async function gateCollect(): Promise<Gate> {
+  const s = await loadSpend();
+
+  if (s.collectsToday >= LIMITS.maxCollectsPerDay()) {
+    return {
+      ok: false,
+      skipX: false,
+      reason: `Daily collect cap reached (${s.collectsToday} / ${LIMITS.maxCollectsPerDay()})`,
+    };
+  }
+
+  if (s.lastCollectAt) {
+    const mins = (Date.now() - new Date(s.lastCollectAt).getTime()) / 60_000;
+    const every = LIMITS.collectEveryMinutes();
+    if (mins < every) {
+      return {
+        ok: false,
+        skipX: false,
+        reason: `Throttled — ${Math.ceil(every - mins)} min until the next collect is allowed`,
+      };
+    }
+  }
+
+  if (scrapeActive()) {
+    return { ok: true, skipX: false, reason: "ok (scrape path — spend gates bypassed)" };
+  }
+
+  return moneyGate(s) ?? { ok: true, skipX: false, reason: "ok" };
+}
+
+/**
+ * Re-check the money gate before falling back to the official (paid) X path
+ * mid-collect — the twscrape sidecar was tried first and failed. collectsToday
+ * and the throttle were already cleared by gateCollect(); this only asks
+ * "can we afford the paid pull?".
+ */
+export async function gateOfficialFallback(): Promise<Gate> {
+  const s = await loadSpend();
+  return moneyGate(s) ?? { ok: true, skipX: false, reason: "ok" };
 }
 
 /** Must pass before any X write (post). */
@@ -216,6 +255,20 @@ export async function recordReads(count: number): Promise<SpendData> {
   return s;
 }
 
+/**
+ * Record a free twscrape-sidecar read. Counts against the daily collect cap and
+ * starts the 90-minute throttle exactly like recordReads, and bumps readsToday
+ * for visibility — but adds $0 to monthSpendUsd and readsCostToday.
+ */
+export async function recordScrapeReads(count: number): Promise<SpendData> {
+  const s = await loadSpend();
+  s.readsToday += count;
+  s.collectsToday += 1;
+  s.lastCollectAt = new Date().toISOString();
+  await saveSpend(s);
+  return s;
+}
+
 export async function recordWrite(hasUrl: boolean): Promise<SpendData> {
   const s = await loadSpend();
   s.postsToday += 1;
@@ -244,6 +297,7 @@ export async function spendSummary() {
     lastCollectAt: s.lastCollectAt,
     collectEveryMinutes: LIMITS.collectEveryMinutes(),
     costModel: COST,
+    xReadMode: scrapeActive() ? ("scrape" as const) : ("official" as const),
     updatedAt: s.updatedAt,
   };
 }

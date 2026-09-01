@@ -1,0 +1,32 @@
+# Fly.io config for the twscrape sidecar.
+#   fly launch --no-deploy      (first time — creates the app)
+#   fly volumes create xscrape_data --size 1 --region <region>
+#   fly secrets set X_SCRAPE_SERVICE_SECRET=... X_SCRAPE_COOKIES=$'name│auth_token=...; ct0=...'
+#   fly deploy
+#
+# Then in the Vercel project (this repo):
+#   X_SCRAPE_SERVICE_URL=https://<app-name>.fly.dev
+#   X_SCRAPE_SERVICE_SECRET=<same secret as above>
+
+app = "bears-x-scrape"
+primary_region = "ord"
+
+[build]
+
+[env]
+  TWS_DB = "/data/accounts.db"
+
+[[mounts]]
+  source = "xscrape_data"
+  destination = "/data"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  min_machines_running = 1
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
