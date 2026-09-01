@@ -1,8 +1,23 @@
 import { NextRequest, NextResponse } from "next/server";
 import { QUERIES } from "@/lib/config";
 import { currentCycle } from "@/lib/config";
-import { gateCollect, recordReads, spendSummary, LIMITS } from "@/lib/spend";
-import { canRead, recentSearch, searchBeatDesk } from "@/lib/x";
+import {
+  gateCollect,
+  gateOfficialFallback,
+  recordReads,
+  recordScrapeReads,
+  spendSummary,
+  LIMITS,
+} from "@/lib/spend";
+import {
+  canRead,
+  hasScrapeCreds,
+  recentSearch,
+  searchBeatDesk,
+  scrapeSearch,
+  scrapeSearchBeatDesk,
+  type SearchResult,
+} from "@/lib/x";
 import { scorePost } from "@/lib/rank";
 import { isBlockedFanAccount } from "@/lib/filter";
 import { synthesize, draftFromFact } from "@/lib/synthesize";
@@ -17,6 +32,9 @@ import type { QueuedTweet } from "@/lib/queue-types";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+// Headroom for a cold twscrape-sidecar call (X_SCRAPE_TIMEOUT_MS, ~30s) on top
+// of facts scrape + the Gemini editor pass. Vercel caps this at the plan limit.
+export const maxDuration = 60;
 
 /** Collect runs for the Roster app (admin action) or Vercel Cron / GitHub Actions. */
 function mayCollect(req: NextRequest): boolean {
@@ -75,6 +93,8 @@ async function runCollect(req: NextRequest): Promise<NextResponse> {
   }
 
   // ---- ARGUMENT: exactly 2 X queries, max_results 20 ----
+  // twscrape sidecar is the primary path (free). On ANY scrape failure, fall
+  // back to the official twitter-api-v2 path — which stays budget-gated here.
   const runBeat = LIMITS.queryCount() >= 2;
   const perQuery = LIMITS.maxResultsPerQuery();
   let fetched = 0;
@@ -82,22 +102,62 @@ async function runCollect(req: NextRequest): Promise<NextResponse> {
   let beatHalf: "full" | "even" | "odd" | "n/a" = "n/a";
   let raw: RawPost[] = [];
   let xError: string | null = null;
+  let xSource: "scrape" | "official" | "none" = "none";
 
-  try {
-    const r1 = await recentSearch(QUERIES[0].query, perQuery);
+  interface ReadPath {
+    search: (q: string, n: number) => Promise<SearchResult>;
+    beat: (
+      n: number,
+    ) => Promise<SearchResult & { beatHalf: "full" | "even" | "odd" }>;
+  }
+
+  const resetAccum = () => {
+    fetched = 0;
+    dropped = 0;
+    beatHalf = "n/a";
+    raw = [];
+  };
+
+  const collectVia = async (path: ReadPath) => {
+    const r1 = await path.search(QUERIES[0].query, perQuery);
     fetched += r1.fetched;
     dropped += r1.dropped;
     raw = raw.concat(r1.posts);
 
     if (runBeat) {
-      const r2 = await searchBeatDesk(perQuery);
+      const r2 = await path.beat(perQuery);
       fetched += r2.fetched;
       dropped += r2.dropped;
       beatHalf = r2.beatHalf;
       raw = raw.concat(r2.posts);
     }
-  } catch (e) {
-    xError = (e as Error).message;
+  };
+
+  if (hasScrapeCreds()) {
+    try {
+      await collectVia({ search: scrapeSearch, beat: scrapeSearchBeatDesk });
+      xSource = "scrape";
+    } catch (e) {
+      xError = `scrape: ${(e as Error).message}`;
+      resetAccum();
+    }
+  }
+
+  if (xSource === "none") {
+    const fb = await gateOfficialFallback();
+    if (fb.ok && !fb.skipX && canRead()) {
+      try {
+        await collectVia({ search: recentSearch, beat: searchBeatDesk });
+        xSource = "official";
+        xError = null;
+      } catch (e) {
+        xError = `${xError ? xError + "; " : ""}official: ${(e as Error).message}`;
+        resetAccum();
+      }
+    } else {
+      const why = !canRead() ? "no X_BEARER_TOKEN" : fb.reason;
+      xError = `${xError ? xError + "; " : ""}official fallback unavailable (${why})`;
+    }
   }
 
   // X read failed → keep the cached pulse's argument layer, but still refresh facts+board
@@ -126,8 +186,13 @@ async function runCollect(req: NextRequest): Promise<NextResponse> {
 
   // bill for every post X returned (dropped still billed, never refetched) —
   // the blocklist below is a display filter, not a re-fetch, so it never
-  // touches billing. Also counts this collect against X_MAX_COLLECTS_PER_DAY.
-  await recordReads(fetched);
+  // touches billing. Both paths count this collect against X_MAX_COLLECTS_PER_DAY
+  // and start the throttle; only the official path costs money.
+  if (xSource === "official") {
+    await recordReads(fetched);
+  } else if (xSource === "scrape") {
+    await recordScrapeReads(fetched);
+  }
 
   // fan-noise blocklist: affiliate/listicle spam never reaches Fight or
   // Traveling fastest, no matter how much engagement it drew.
@@ -137,7 +202,7 @@ async function runCollect(req: NextRequest): Promise<NextResponse> {
 
   console.log(
     `[collect] facts=${factsBundle.facts.length}(cache=${factsBundle.fromCache}) ` +
-      `x.fetched=${fetched} x.kept=${raw.length} x.dropped=${dropped} ` +
+      `x.source=${xSource} x.fetched=${fetched} x.kept=${raw.length} x.dropped=${dropped} ` +
       `blocklist=${blocklistDropped} beatHalf=${beatHalf}`,
   );
 
@@ -153,7 +218,7 @@ async function runCollect(req: NextRequest): Promise<NextResponse> {
         factsFromCache: factsBundle.fromCache,
         mergeLog: factsBundle.mergeLog,
         posts: scored,
-        xMeta: { fetched, kept: scored.length, dropped, beatHalf, blocklistDropped },
+        xMeta: { fetched, kept: scored.length, dropped, beatHalf, blocklistDropped, source: xSource },
       })
     : fallbackPulse();
 
@@ -220,6 +285,7 @@ async function runCollect(req: NextRequest): Promise<NextResponse> {
     facts: pulse.facts.length,
     factCounts: pulse.admin.factCounts,
     mergeLog: pulse.admin.mergeLog,
+    xSource,
     fetched,
     kept: scored.length,
     dropped,

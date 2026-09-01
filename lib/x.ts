@@ -16,6 +16,16 @@ export function hasWriteCreds(): boolean {
   );
 }
 
+/**
+ * Whether the twscrape sidecar is configured. When it is, it's the PRIMARY
+ * read path (free) and the official API below is only the fallback.
+ */
+export function hasScrapeCreds(): boolean {
+  return !!(
+    process.env.X_SCRAPE_SERVICE_URL && process.env.X_SCRAPE_SERVICE_SECRET
+  );
+}
+
 /** Whether an X recent-search read is possible at all (credentials present). */
 export function canRead(): boolean {
   return hasReadCreds();
@@ -46,6 +56,20 @@ export interface SearchResult {
 }
 
 /**
+ * Apply the Bears-football filter and shape a SearchResult. Shared by the
+ * official API path (recentSearch) and the twscrape path (scrapeSearch) so both
+ * drop the same posts and count `fetched` the same way.
+ */
+function buildSearchResult(built: RawPost[]): SearchResult {
+  const posts = built.filter((p) => isBearsFootballPost(p.text, p.authorHandle));
+  return { posts, fetched: built.length, dropped: built.length - posts.length };
+}
+
+function clampMaxResults(maxResults: number): number {
+  return Math.min(100, Math.max(10, Math.floor(maxResults)));
+}
+
+/**
  * One recent-search request. `maxResults` is clamped to the API's 10..100 range.
  * Every returned post is billed by the caller; posts that fail
  * isBearsFootballPost are dropped here and never refetched.
@@ -56,7 +80,7 @@ export async function recentSearch(
 ): Promise<SearchResult> {
   const client = readClient();
   const res = await client.v2.search(query, {
-    max_results: Math.min(100, Math.max(10, Math.floor(maxResults))),
+    max_results: clampMaxResults(maxResults),
     "tweet.fields": ["public_metrics", "created_at", "author_id", "lang"],
     expansions: ["author_id"],
     "user.fields": ["username", "name"],
@@ -94,8 +118,7 @@ export async function recentSearch(
     });
   }
 
-  const posts = built.filter((p) => isBearsFootballPost(p.text, p.authorHandle));
-  return { posts, fetched: built.length, dropped: built.length - posts.length };
+  return buildSearchResult(built);
 }
 
 /**
@@ -116,6 +139,105 @@ export async function searchBeatDesk(
       half === "even" ? i % 2 === 0 : i % 2 === 1
     );
     const r = await recentSearch(buildBeatQuery(handles), maxResults);
+    return { ...r, beatHalf: half };
+  }
+}
+
+// ---- twscrape sidecar (PRIMARY read path) ---------------------------------
+// Free reads via the twscrape HTTP sidecar (services/x-scrape). On ANY failure
+// the collect route falls back to recentSearch/searchBeatDesk above, which stay
+// budget-gated by lib/spend.ts. The sidecar is only ever called from
+// /api/collect — never on page load, never in dev, never in a loop.
+
+function scrapeTimeoutMs(): number {
+  const v = Number(process.env.X_SCRAPE_TIMEOUT_MS);
+  return Number.isFinite(v) && v > 0 ? v : 30_000;
+}
+
+class ScrapeQueryTooLongError extends Error {
+  constructor() {
+    super("scrape service: query_too_long");
+    this.name = "ScrapeQueryTooLongError";
+  }
+}
+
+interface ScrapeTweet {
+  id: string;
+  text: string;
+  authorId: string;
+  authorHandle: string;
+  authorName: string;
+  createdAt: string;
+  likes: number;
+  retweets: number;
+  replies: number;
+  quotes: number;
+  impressions?: number | null;
+  url?: string;
+}
+
+/** One search via the twscrape sidecar. Throws on any non-2xx or transport error. */
+export async function scrapeSearch(
+  query: string,
+  maxResults: number
+): Promise<SearchResult> {
+  const base = (process.env.X_SCRAPE_SERVICE_URL as string).replace(/\/+$/, "");
+  const res = await fetch(`${base}/search`, {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${process.env.X_SCRAPE_SERVICE_SECRET as string}`,
+    },
+    body: JSON.stringify({
+      query,
+      limit: clampMaxResults(maxResults),
+      kind: "latest",
+    }),
+    // Generous default: a free-tier host (Render) can cold-start ~30-60s. A
+    // timeout here just drops us to the official API for this collect.
+    signal: AbortSignal.timeout(scrapeTimeoutMs()),
+  });
+
+  if (res.status === 422) throw new ScrapeQueryTooLongError();
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`scrape service HTTP ${res.status}${detail ? ` — ${detail.slice(0, 200)}` : ""}`);
+  }
+
+  const data = (await res.json()) as { tweets?: ScrapeTweet[] };
+  const built: RawPost[] = (data.tweets ?? []).map((t) => ({
+    id: t.id,
+    text: t.text,
+    authorId: t.authorId ?? "",
+    authorHandle: t.authorHandle || "unknown",
+    authorName: t.authorName || t.authorHandle || "Unknown",
+    createdAt: t.createdAt || new Date().toISOString(),
+    likes: t.likes ?? 0,
+    retweets: t.retweets ?? 0,
+    replies: t.replies ?? 0,
+    quotes: t.quotes ?? 0,
+    impressions: t.impressions ?? undefined,
+    isBeat: isBeatHandle(t.authorHandle),
+    url: t.url || `https://x.com/${t.authorHandle}/status/${t.id}`,
+  }));
+
+  return buildSearchResult(built);
+}
+
+/** Query 2 via the twscrape sidecar — mirrors searchBeatDesk's half-list fallback. */
+export async function scrapeSearchBeatDesk(
+  maxResults: number
+): Promise<SearchResult & { beatHalf: "full" | "even" | "odd" }> {
+  try {
+    const r = await scrapeSearch(buildBeatQuery(BEAT_QUERY_HANDLES), maxResults);
+    return { ...r, beatHalf: "full" };
+  } catch (e) {
+    if (!(e instanceof ScrapeQueryTooLongError)) throw e;
+    const half = pickBeatHalf();
+    const handles = BEAT_QUERY_HANDLES.filter((_, i) =>
+      half === "even" ? i % 2 === 0 : i % 2 === 1
+    );
+    const r = await scrapeSearch(buildBeatQuery(handles), maxResults);
     return { ...r, beatHalf: half };
   }
 }

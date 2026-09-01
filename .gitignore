@@ -13,5 +13,10 @@ build
 
 *.tsbuildinfo
 .DS_Store
+
+# x-scrape sidecar (services/x-scrape)
+services/x-scrape/.venv
+services/x-scrape/accounts.db
+services/x-scrape/__pycache__
 npm-debug.log*
 .vercel

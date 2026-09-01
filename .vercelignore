@@ -1,0 +1,4 @@
+# The twscrape sidecar is a standalone Python service deployed separately
+# (services/x-scrape/README.md) — not part of the Next.js build.
+services/
+docs/

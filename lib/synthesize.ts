@@ -242,7 +242,7 @@ export interface SynthesizeInput {
   factsFromCache: boolean;
   mergeLog: { key: string; from: number; to: number }[];
   posts: ScoredPost[]; // all kept X posts (fan + beat), blocklist already applied
-  xMeta: { fetched: number; kept: number; dropped: number; beatHalf: string; blocklistDropped: number };
+  xMeta: { fetched: number; kept: number; dropped: number; beatHalf: string; blocklistDropped: number; source: "scrape" | "official" | "none" };
 }
 
 export function synthesize(input: SynthesizeInput): PulsePayload {

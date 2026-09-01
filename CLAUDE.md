@@ -9,7 +9,7 @@ it owns the user session/roles and authenticates every request with a shared sec
 | Layer | Cost | Source | Rule |
 |---|---|---|---|
 | **FACTS** | **$0** | Scraped official / beat transaction pages (`lib/facts.ts`) | Confirmed roster moves only. `official` source confirms alone; `wire` needs two distinct wires. Never fabricate a move. |
-| **ARGUMENT** | **costs money** (X API) | X/Twitter recent search (`lib/x.ts`) | The fan/beat "argument" around the facts. Every read and write is metered and budget-gated. |
+| **ARGUMENT** | **$0 via twscrape, else costs money** | X/Twitter recent search (`lib/x.ts`) | The fan/beat "argument" around the facts. Reads go through the twscrape sidecar first (free — `services/x-scrape/`); on any failure they fall back to the official X API, which stays metered and budget-gated. Writes are always the official API. |
 
 `lib/llmExtract.ts` re-parses already-scraped trade sentences with Gemini
 (`gemini-2.0-flash`, free tier, `GEMINI_API_KEY`). It adds **zero** X/API cost, fails
@@ -19,14 +19,15 @@ closed to the regex path, and must stay that way.
 
 - `lib/config.ts` — beat/national handles, blocklists, queries. "Two queries only. max_results 20. Never collect on page load."
 - `lib/facts.ts` — FACT pipe: scrape → confirm → merge trade legs into ONE fact per counterparty team.
-- `lib/x.ts` — X read (`X_BEARER_TOKEN`) and write (4 OAuth1 vars) clients.
+- `lib/x.ts` — X read: twscrape sidecar (`scrapeSearch` / `hasScrapeCreds`, primary/free) → official `twitter-api-v2` (`recentSearch`, `X_BEARER_TOKEN`, budget-gated fallback). Write = official only (4 OAuth1 vars).
 - `lib/rank.ts` / `lib/filter.ts` — categorize + "Chicago Bears football, or nothing" filtering.
 - `lib/synthesize.ts` — build the `PulsePayload` (facts, beat rail, fan argument, viral cards, creator prompts).
-- `lib/spend.ts` — cost estimates + monthly/daily gates (`gateCollect`, `gateWrite`).
+- `lib/spend.ts` — cost estimates + gates (`gateCollect`, `gateOfficialFallback`, `gateWrite`); `recordReads` (paid) vs `recordScrapeReads` ($0); `scrapeActive()`.
 - `lib/kv.ts` — storage: Upstash Redis on Vercel (`KV_REST_API_*`), local `.data/*.json` fallback.
 - `lib/store.ts` — `readPulse`/`writePulse`, `readQueue`/`writeQueue`.
 - `lib/service-auth.ts` — `isServiceRequest` (shared `DESK_SERVICE_SECRET`), `isCronRequest` (`CRON_SECRET`).
-- `app/api/collect` — the only route that spends: scrape facts + X read → synthesize → write pulse + queue.
+- `services/x-scrape/` — standalone Python (FastAPI + twscrape) sidecar, deployed separately (Render free tier via `render.yaml`, or Fly). Account DB rebuilt from `X_SCRAPE_COOKIES` each boot. Only called from `/api/collect`; `desk-collect.yml` wakes it first. Burner X accounts, ToS/ban risk — see its README.
+- `app/api/collect` — the only route that reads/writes X: twscrape (or official fallback) + scrape facts → synthesize → write pulse + queue.
 - `app/api/cron` — Vercel Cron (daily `0 13 * * *`) → forwards to `/api/collect`.
 - `app/api/pulse|queue|spend` — read-only, service-auth'd, never trigger a collect.
 - `app/api/tweet` — POST `{id, action}` from the Roster app; budget-gated write.
@@ -55,17 +56,24 @@ direction bugs (the Clark Phillips III case) are the recurring failure mode.
 
 ## Cost discipline (hard constraint)
 
-- Never add code that reads or writes X on page load, in `dev`, or in a loop.
+- Never add code that reads or writes X on page load, in `dev`, or in a loop —
+  this includes the twscrape sidecar: it only answers `/search` calls from `/api/collect`.
 - Collection happens **only** via `/api/collect` (cron or explicit Roster-app call).
-- Any new X call must go through `lib/spend.ts` gates. Respect `X_MONTHLY_BUDGET_USD`,
-  `X_MAX_READS_PER_DAY`, `X_MAX_POSTS_PER_DAY`.
+- The twscrape path is free but still passes `gateCollect` — the 90-min throttle
+  and `X_MAX_COLLECTS_PER_DAY` apply to it; only the USD budget is bypassed.
+- Any new *official*-API X call must go through `lib/spend.ts` gates
+  (`gateCollect` / `gateOfficialFallback` / `gateWrite`). Respect
+  `X_MONTHLY_BUDGET_USD`, `X_MAX_READS_PER_DAY`, `X_MAX_POSTS_PER_DAY`.
 - Keep `lib/llmExtract.ts` on the free Gemini tier and no-op without the key.
 
 ## Secrets
 
-`.env.local` holds `DESK_SERVICE_SECRET`, `CRON_SECRET`, and all five X API
-credentials. Never commit it, never echo its values, never paste a key into a
-commit message, code comment, or PR description.
+`.env.local` holds `DESK_SERVICE_SECRET`, `CRON_SECRET`, all five X API
+credentials, and (optional) `X_SCRAPE_SERVICE_URL` / `X_SCRAPE_SERVICE_SECRET`
+for the twscrape sidecar. The sidecar's own burner-account cookies live only in
+its host's secrets (e.g. `fly secrets`), never in this repo. Never commit
+`.env.local`, never echo its values, never paste a key into a commit message,
+code comment, or PR description.
 
 ## Git / PR workflow (solo, PR-gated)
 

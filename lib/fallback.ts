@@ -29,7 +29,7 @@ export function fallbackPulse(): PulsePayload {
       factSources: [],
       factCounts: { confirmed: 0, disputed: 0, note: 0 },
       notes: [],
-      x: { fetched: 0, kept: 0, dropped: 0, beatHalf: "n/a", blocklistDropped: 0 },
+      x: { fetched: 0, kept: 0, dropped: 0, beatHalf: "n/a", blocklistDropped: 0, source: "none" },
       factsFetchedAt: now,
       factsFromCache: true,
       mergeLog: [],

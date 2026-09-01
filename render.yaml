@@ -1,0 +1,26 @@
+# Render blueprint for the twscrape sidecar (services/x-scrape).
+# Deploy: Render dashboard → New → Blueprint → pick this repo. Then set the two
+# secret env vars below in the service's Environment tab (they are marked
+# sync:false so Render prompts instead of reading them from here):
+#   X_SCRAPE_SERVICE_SECRET  — same value as the Vercel env var of that name
+#   X_SCRAPE_COOKIES         — burner1│auth_token=…; ct0=…   (one line per account)
+#
+# Free plan sleeps after ~15 min idle. The desk-collect GitHub workflow pings
+# the service ~45s before each collect to wake it; a cold collect that races the
+# wake just falls back to the official X API for that cycle.
+services:
+  - type: web
+    name: bears-x-scrape
+    runtime: docker
+    rootDir: services/x-scrape
+    dockerfilePath: ./Dockerfile
+    plan: free
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: X_SCRAPE_SERVICE_SECRET
+        sync: false
+      - key: X_SCRAPE_COOKIES
+        sync: false
+      - key: X_SCRAPE_ACCOUNTS
+        sync: false
