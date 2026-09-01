@@ -14,7 +14,7 @@ import {
 // regression goes red before it ships, independent of the optional Gemini
 // editor pass in lib/editor.ts.
 
-let clock = Date.parse("2026-08-30T12:00:00.000Z");
+const clock = Date.parse("2026-08-30T12:00:00.000Z");
 function mkRaw(over: Partial<RawFact> = {}): RawFact {
   return {
     type: "trade",
