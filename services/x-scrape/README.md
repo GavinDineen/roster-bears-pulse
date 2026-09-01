@@ -67,7 +67,11 @@ curl -s -XPOST localhost:8080/search \
 2. On the service's **Environment** tab set:
    - `X_SCRAPE_SERVICE_SECRET` — a long random string.
    - `X_SCRAPE_COOKIES` — `burner1│auth_token=…; ct0=…` (one line per account).
-3. First deploy runs automatically. **Logs** should show
+3. **Leave Health Check Path empty.** The free tier's 0.1 vCPU can't answer a
+   health probe mid-search, so a configured health check makes Render
+   restart-loop the service. `render.yaml` omits it for this reason; if you
+   create the service by hand, clear the field under Settings → Health Check Path.
+4. First deploy runs automatically. **Logs** should show
    `[accounts] pool ready: 1/1 active`.
 4. In the Vercel project for this repo set `X_SCRAPE_SERVICE_URL` to the
    `https://bears-x-scrape.onrender.com` URL and `X_SCRAPE_SERVICE_SECRET` to

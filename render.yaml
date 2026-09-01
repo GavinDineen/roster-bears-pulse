@@ -8,6 +8,11 @@
 # Free plan sleeps after ~15 min idle. The desk-collect GitHub workflow pings
 # the service ~45s before each collect to wake it; a cold collect that races the
 # wake just falls back to the official X API for that cycle.
+#
+# No healthCheckPath on purpose: the free tier's 0.1 vCPU can't answer a health
+# probe while a search is running, so Render restart-loops the service. Without
+# one, Render only checks the port is open. `/` is still a plain liveness route
+# for the workflow's wake step.
 services:
   - type: web
     name: bears-x-scrape
@@ -15,7 +20,6 @@ services:
     rootDir: services/x-scrape
     dockerfilePath: ./Dockerfile
     plan: free
-    healthCheckPath: /
     autoDeploy: true
     envVars:
       - key: X_SCRAPE_SERVICE_SECRET
