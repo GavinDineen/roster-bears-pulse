@@ -26,12 +26,16 @@ export function isServiceRequest(req: NextRequest): boolean {
   return !!secret && !!token && safeEqual(token, secret);
 }
 
-/** True when Vercel Cron presented CRON_SECRET (header or ?secret=). */
+/**
+ * True when the cron caller presented CRON_SECRET as an
+ * `Authorization: Bearer` header. Vercel Cron sends this automatically when
+ * CRON_SECRET is set; the GitHub Actions collect workflow sends it explicitly.
+ * A `?secret=` query param is intentionally NOT accepted — it leaks the
+ * secret into request logs, proxies, and referrers.
+ */
 export function isCronRequest(req: NextRequest): boolean {
   const secret = process.env.CRON_SECRET;
   if (!secret) return false;
   const token = bearer(req);
-  if (token && safeEqual(token, secret)) return true;
-  const qs = new URL(req.url).searchParams.get("secret");
-  return !!qs && safeEqual(qs, secret);
+  return !!token && safeEqual(token, secret);
 }
