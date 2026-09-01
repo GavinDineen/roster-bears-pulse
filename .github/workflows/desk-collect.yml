@@ -55,5 +55,6 @@ jobs:
       - name: Call /api/cron
         if: steps.gate.outputs.should_run == 'true'
         run: |
-          curl -sS -f -X GET "https://bears.therostercollective.com/api/cron?secret=${{ secrets.CRON_SECRET }}" \
+          curl -sS -f -X GET "https://bears.therostercollective.com/api/cron" \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
             -o /dev/null -w "collect responded: %{http_code}\n"
